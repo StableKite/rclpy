@@ -14,7 +14,7 @@
 
 from enum import IntEnum
 from types import TracebackType
-from typing import Callable, Optional, Protocol, Type, TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Callable, Optional, Protocol, Type, TypedDict
 
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
@@ -25,7 +25,6 @@ from .duration import Duration
 from .exceptions import NotInitializedException
 from .time import Time, TimeHandle
 from .utilities import get_default_context
-
 
 if TYPE_CHECKING:
     from typing import TypeAlias
@@ -92,6 +91,13 @@ class TimeJumpDictionary(TypedDict):
 
 
 JumpHandlePreCallbackType: 'TypeAlias' = Callable[[], None]
+
+
+def _require_time(value: object) -> Time:
+    if not isinstance(value, Time):
+        raise TypeError(
+            'Time must be specified as rclpy.time.Time. Received type: {0}'.format(type(value)))
+    return value
 
 
 class JumpHandle:
@@ -190,7 +196,7 @@ class Clock:
         if not isinstance(clock_type, (ClockType, _rclpy.ClockType)):
             raise TypeError('Clock type must be a ClockType enum')
         if clock_type is ClockType.ROS_TIME:
-            self: 'Clock' = super().__new__(ROSClock)
+            self: 'Clock' = object.__new__(ROSClock)
         else:
             self = super().__new__(cls)
         self.__clock = _rclpy.Clock(clock_type)
@@ -304,11 +310,11 @@ class Clock:
             on_clock_change=True)
         with self.create_jump_callback(threshold, post_callback=on_time_jump):
             if ClockType.SYSTEM_TIME == self._clock_type:
-                event.wait_until_system(self.__clock, until._time_handle)
+                event.wait_until_system(self.__clock, until.handle)
             elif ClockType.STEADY_TIME == self._clock_type:
-                event.wait_until_steady(self.__clock, until._time_handle)
+                event.wait_until_steady(self.__clock, until.handle)
             elif ClockType.ROS_TIME == self._clock_type:
-                event.wait_until_ros(self.__clock, until._time_handle)
+                event.wait_until_ros(self.__clock, until.handle)
 
         if not context.ok() or time_source_changed:
             return False
@@ -344,7 +350,7 @@ class Clock:
 class ROSClock(Clock):
 
     def __new__(cls) -> 'ROSClock':
-        self = super().__new__(Clock, clock_type=ClockType.ROS_TIME)
+        self = super().__new__(cls, clock_type=ClockType.ROS_TIME)
         assert isinstance(self, ROSClock)
         return self
 
@@ -361,8 +367,6 @@ class ROSClock(Clock):
 
     def set_ros_time_override(self, time: Time) -> None:
         """Set the next time the ROS clock will report when ROS time is active."""
-        if not isinstance(time, Time):
-            raise TypeError(
-                'Time must be specified as rclpy.time.Time. Received type: {0}'.format(type(time)))
+        time = _require_time(time)
         with self.handle:
-            self.handle.set_ros_time_override(time._time_handle)
+            self.handle.set_ros_time_override(time.handle)

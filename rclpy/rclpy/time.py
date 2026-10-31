@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Protocol, Tuple, Union
+from typing import TYPE_CHECKING, Protocol, Tuple, Union, overload
 
 import builtin_interfaces.msg
 
@@ -22,12 +22,24 @@ from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 from .clock_type import ClockType
 
+if TYPE_CHECKING:
+    from types import NotImplementedType
+else:
+    # Keep runtime annotation introspection available on older Python too.
+    NotImplementedType = type(NotImplemented)
+
 
 class TimeHandle(Protocol):
     """Type alias of _rclpy.rcl_time_point_t."""
 
     nanoseconds: int
     clock_type: ClockType
+
+
+def _require_time_message(value: object) -> builtin_interfaces.msg.Time:
+    if not isinstance(value, builtin_interfaces.msg.Time):
+        raise TypeError('Must pass a builtin_interfaces.msg.Time object')
+    return value
 
 
 class Time:
@@ -60,6 +72,11 @@ class Time:
         self._time_handle: TimeHandle = _rclpy.rcl_time_point_t(total_nanoseconds, clock_type)
 
     @property
+    def handle(self) -> TimeHandle:
+        """Return the internal native time point for use within rclpy."""
+        return self._time_handle
+
+    @property
     def nanoseconds(self) -> int:
         """:return: the total number of nanoseconds since the clock's epoch."""
         return self._time_handle.nanoseconds
@@ -82,7 +99,13 @@ class Time:
         return 'Time(nanoseconds={0}, clock_type={1})'.format(
             self.nanoseconds, self.clock_type.name)
 
-    def __add__(self, other: Duration) -> 'Time':
+    @overload
+    def __add__(self, other: Duration) -> 'Time': ...
+
+    @overload
+    def __add__(self, other: object) -> Union['Time', 'NotImplementedType']: ...
+
+    def __add__(self, other: object) -> Union['Time', 'NotImplementedType']:
         if isinstance(other, Duration):
             try:
                 return Time(
@@ -96,7 +119,16 @@ class Time:
     def __radd__(self, other: Duration) -> 'Time':
         return self.__add__(other)
 
-    def __sub__(self, other: Union['Time', Duration]) -> Union['Time', Duration]:
+    @overload
+    def __sub__(self, other: 'Time') -> Duration: ...
+
+    @overload
+    def __sub__(self, other: Duration) -> 'Time': ...
+
+    @overload
+    def __sub__(self, other: object) -> Union['Time', Duration, 'NotImplementedType']: ...
+
+    def __sub__(self, other: object) -> Union['Time', Duration, 'NotImplementedType']:
         if isinstance(other, Time):
             if self.clock_type != other.clock_type:
                 raise TypeError("Can't subtract times with different clock types")
@@ -175,6 +207,5 @@ class Time:
         :type msg: builtin_interfaces.msg.Time
         :rtype: Time
         """
-        if not isinstance(msg, builtin_interfaces.msg.Time):
-            raise TypeError('Must pass a builtin_interfaces.msg.Time object')
+        msg = _require_time_message(msg)
         return cls(seconds=msg.sec, nanoseconds=msg.nanosec, clock_type=clock_type)
