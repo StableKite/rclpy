@@ -62,6 +62,14 @@ class SignalHandlerGuardCondition(GuardCondition):
             pass
 
     def destroy(self):
-        with self.handle:
-            _rclpy.unregister_sigint_guard_condition(self.handle)
+        try:
+            with self.handle:
+                _rclpy.unregister_sigint_guard_condition(self.handle)
+        except InvalidHandle:
+            # Another cleanup path already requested native destruction.
+            return
+        except ValueError:
+            # Unregister may already have completed; still release the native
+            # guard instead of leaving it alive until Python collection.
+            pass
         super().destroy()

@@ -196,6 +196,7 @@ if(BUILD_TESTING)
       test/test_destruction.py
       test/test_events_executor.py
       test/test_executor.py
+      test/test_executor_cleanup.py
       test/test_expand_topic_name.py
       test/test_guard_condition.py
       test/test_init_shutdown.py

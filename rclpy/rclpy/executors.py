@@ -302,8 +302,10 @@ class Executor(ContextManager['Executor']):
         return True
 
     def __del__(self):
-        if self._sigint_gc is not None:
-            self._sigint_gc.destroy()
+        # __init__ can fail before the signal guard has been constructed.
+        guard = getattr(self, '_sigint_gc', None)
+        if guard is not None:
+            guard.destroy()
 
     def add_node(self, node: 'Node') -> bool:
         """
