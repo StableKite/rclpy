@@ -132,10 +132,10 @@ class JumpHandle:
 
     def unregister(self) -> None:
         """Remove a jump callback from the clock."""
-        if self._clock is not None:
-            with self._clock.handle:
-                self._clock.handle.remove_clock_callback(self)
-            self._clock = None
+        clock = self._clock
+        if clock is not None:
+            with clock.handle:
+                clock.handle.unregister_clock_callback(self)
 
     def __enter__(self) -> 'JumpHandle':
         return self
@@ -172,6 +172,10 @@ class ClockHandle(DestroyableType, Protocol):
 
     def remove_clock_callback(self, pyjump_handle: JumpHandle) -> None:
         """Remove a time jump callback from a clock."""
+        ...
+
+    def unregister_clock_callback(self, pyjump_handle: JumpHandle) -> None:
+        """Remove a Python jump handle and clear its owner atomically."""
         ...
 
 

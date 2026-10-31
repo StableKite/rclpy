@@ -23,12 +23,35 @@
 
 #include "destroyable.hpp"
 #include "exceptions.hpp"
-#include "utils.hpp"
 
 namespace py = pybind11;
 
 namespace rclpy
 {
+class ClockState;
+
+/// Own a native clock while serializing mutations that invoke Python callbacks.
+class ClockMutation
+{
+public:
+  explicit ClockMutation(std::shared_ptr<ClockState> state, bool cleanup = false);
+  ClockMutation(const ClockMutation &) = delete;
+  ClockMutation & operator=(const ClockMutation &) = delete;
+  ~ClockMutation() noexcept;
+
+  rcl_clock_t * rcl_ptr() const;
+  void track_timer(const std::shared_ptr<void> & owner);
+
+private:
+  friend class Clock;
+  // Attach before touching Python references. RLock waits cooperate with the
+  // Python runtime; no C++ mutex is held while invoking user jump callbacks.
+  py::gil_scoped_acquire attached_;
+  std::shared_ptr<ClockState> state_;
+  py::object release_;
+  bool locked_ = false;
+};
+
 class Clock : public Destroyable, public std::enable_shared_from_this<Clock>
 {
 public:
@@ -40,6 +63,7 @@ public:
    * This constructor creates a Clock object
    */
   explicit Clock(int clock_type);
+  Clock(const Clock & other);
 
   /// Returns the current value of the clock
   /**
@@ -103,17 +127,24 @@ public:
   void
   remove_clock_callback(py::object pyjump_handle);
 
+  /// Complete the Python JumpHandle unregister transaction under this clock's guard.
+  void unregister_clock_callback(py::object pyjump_handle);
+
   /// Get rcl_clock_t pointer
-  rcl_clock_t * rcl_ptr() const
-  {
-    return rcl_clock_.get();
-  }
+  rcl_clock_t * rcl_ptr() const;
+
+  /// Keep the native allocation alive independently of a closing Python owner.
+  std::shared_ptr<rcl_clock_t> rcl_handle() const;
+
+  /// Timer initialization/finalization also mutate this clock's callback array.
+  ClockMutation mutation() const;
 
   /// Force an early destruction of this object
   void destroy() override;
 
 private:
-  std::shared_ptr<rcl_clock_t> rcl_clock_;
+  friend class TimerState;
+  std::shared_ptr<ClockState> state_;
 };
 
 /// Define a pybind11 wrapper for an rclpy::Clock

@@ -31,6 +31,7 @@ namespace py = pybind11;
 
 namespace rclpy
 {
+class TimerState;
 
 class Timer : public Destroyable, public std::enable_shared_from_this<Timer>
 {
@@ -50,6 +51,7 @@ public:
    * \return a timer capsule
    */
   Timer(Clock & clock, Context & context, int64_t period_nsec, bool autostart);
+  Timer(const Timer & other);
 
   ~Timer() = default;
 
@@ -127,19 +129,16 @@ public:
   bool is_timer_canceled();
 
   /// Get rcl_timer_t pointer
-  rcl_timer_t *
-  rcl_ptr() const
-  {
-    return rcl_timer_.get();
-  }
+  rcl_timer_t * rcl_ptr() const;
+
+  /// Own the timer, its clock and native context throughout a native call.
+  std::shared_ptr<rcl_timer_t> rcl_handle() const;
 
   /// Force an early destruction of this object
   void destroy() override;
 
 private:
-  Context context_;
-  Clock clock_;
-  std::shared_ptr<rcl_timer_t> rcl_timer_;
+  std::shared_ptr<TimerState> state_;
 };
 
 /// Define a pybind11 wrapper for an rcl_timer_t

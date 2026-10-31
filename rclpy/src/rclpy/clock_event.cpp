@@ -55,8 +55,17 @@ void ClockEvent::wait_until(std::shared_ptr<Clock> clock, rcl_time_point_t until
 
 void ClockEvent::wait_until_ros(std::shared_ptr<Clock> clock, rcl_time_point_t until)
 {
-  // Check if ROS time is enabled in C++ to avoid TOCTTOU with TimeSource by holding GIL
+  // The caller registers its sticky wakeup callback before entering this
+  // function. A jump may already have reached the target before registration.
   if (clock->get_ros_time_override_is_enabled()) {
+    const auto now = clock->get_now();
+    rcl_duration_t remaining;
+    if (RCL_RET_OK != rcl_difference_times(&now, &until, &remaining)) {
+      throw RCLError("failed to subtract times");
+    }
+    if (remaining.nanoseconds <= 0) {
+      return;
+    }
     // Could be a long wait, release the gil
     py::gil_scoped_release release;
     std::unique_lock<std::mutex> lock(mutex_);
