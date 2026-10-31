@@ -15,6 +15,8 @@
 #include <pybind11/pybind11.h>
 
 #include <memory>
+#include <limits>
+#include <mutex>
 #include <stdexcept>
 
 #include "destroyable.hpp"
@@ -33,8 +35,12 @@ Destroyable::Destroyable(const Destroyable &)
 void
 Destroyable::enter()
 {
+  std::lock_guard<std::mutex> guard(lifecycle_mutex_);
   if (please_destroy_) {
     throw InvalidHandle("cannot use Destroyable because destruction was requested");
+  }
+  if (use_count == std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error("Destroyable use_count exceeds the native size range");
   }
   ++use_count;
 }
@@ -42,12 +48,19 @@ Destroyable::enter()
 void
 Destroyable::exit(py::object, py::object, py::object)
 {
-  if (0u == use_count) {
-    throw std::runtime_error("Internal error: Destroyable use_count would be negative");
+  bool cleanup = false;
+  {
+    std::lock_guard<std::mutex> guard(lifecycle_mutex_);
+    if (0u == use_count) {
+      throw std::runtime_error("Internal error: Destroyable use_count would be negative");
+    }
+    --use_count;
+    if (please_destroy_ && 0u == use_count && !destroy_started_) {
+      destroy_started_ = true;
+      cleanup = true;
+    }
   }
-
-  --use_count;
-  if (please_destroy_ && 0u == use_count) {
+  if (cleanup) {
     destroy();
   }
 }
@@ -62,12 +75,16 @@ Destroyable::destroy()
 void
 Destroyable::destroy_when_not_in_use()
 {
-  if (please_destroy_) {
-    // already asked to destroy
-    return;
+  bool cleanup = false;
+  {
+    std::lock_guard<std::mutex> guard(lifecycle_mutex_);
+    please_destroy_ = true;
+    if (0u == use_count && !destroy_started_) {
+      destroy_started_ = true;
+      cleanup = true;
+    }
   }
-  please_destroy_ = true;
-  if (0u == use_count) {
+  if (cleanup) {
     destroy();
   }
 }

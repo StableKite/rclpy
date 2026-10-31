@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <rcpputils/scope_exit.hpp>
@@ -38,6 +39,31 @@
 
 namespace rclpy
 {
+
+CliArguments::CliArguments(py::object arguments)
+: python_(arguments.is_none() ? py::tuple() : py::tuple(arguments))
+{
+  if (python_.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    throw py::value_error("too many cli arguments");
+  }
+  storage_.reserve(python_.size());
+  for (py::handle argument : python_) {
+    Py_ssize_t length;
+    const char * text = PyUnicode_AsUTF8AndSize(argument.ptr(), &length);
+    if (!text) {
+      throw py::error_already_set();
+    }
+    std::string owned(text, static_cast<size_t>(length));
+    if (owned.find('\0') != std::string::npos) {
+      throw py::value_error("embedded null in cli argument");
+    }
+    storage_.push_back(std::move(owned));
+  }
+  values_.reserve(storage_.size());
+  for (const auto & argument : storage_) {
+    values_.push_back(argument.c_str());
+  }
+}
 
 py::list
 convert_to_py_names_and_types(const rcl_names_and_types_t * names_and_types)
@@ -160,30 +186,9 @@ remove_ros_args(py::object pycli_args)
   rcl_allocator_t allocator = rcl_get_default_allocator();
   rcl_arguments_t parsed_args = rcl_get_zero_initialized_arguments();
 
-  std::vector<const char *> arg_values;
-  const char ** const_arg_values = NULL;
-  py::list pyargs;
-  if (!pycli_args.is_none()) {
-    pyargs = pycli_args;
-    if (!pyargs.empty()) {
-      arg_values.resize(pyargs.size());
-      for (size_t i = 0; i < pyargs.size(); ++i) {
-        // CPython owns const char * memory - no need to free it
-        arg_values[i] = PyUnicode_AsUTF8(pyargs[i].ptr());
-        if (!arg_values[i]) {
-          throw py::error_already_set();
-        }
-      }
-      const_arg_values = &(arg_values[0]);
-    }
-  }
-
-  if (arg_values.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-    throw py::value_error("too many cli arguments");
-  }
-
-  int num_args = static_cast<int>(arg_values.size());
-  ret = rcl_parse_arguments(num_args, const_arg_values, allocator, &parsed_args);
+  CliArguments cli_arguments(pycli_args);
+  ret = rcl_parse_arguments(
+    cli_arguments.argc(), cli_arguments.argv(), allocator, &parsed_args);
 
   if (RCL_RET_INVALID_ROS_ARGS == ret) {
     throw RCLInvalidROSArgsError("Failed to parse ROS arguments");
@@ -205,13 +210,13 @@ remove_ros_args(py::object pycli_args)
       }
     });
 
-  throw_if_unparsed_ros_args(pyargs, parsed_args);
+  throw_if_unparsed_ros_args(cli_arguments.snapshot(), parsed_args);
 
   int nonros_argc = 0;
   const char ** nonros_argv = NULL;
 
   ret = rcl_remove_ros_arguments(
-    const_arg_values,
+    cli_arguments.argv(),
     &parsed_args,
     allocator,
     &nonros_argc,
@@ -244,7 +249,7 @@ remove_ros_args(py::object pycli_args)
 }
 
 void
-throw_if_unparsed_ros_args(py::list pyargs, const rcl_arguments_t & rcl_args)
+throw_if_unparsed_ros_args(py::sequence pyargs, const rcl_arguments_t & rcl_args)
 {
   int unparsed_ros_args_count = rcl_arguments_get_count_unparsed_ros(&rcl_args);
 

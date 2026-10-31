@@ -63,10 +63,11 @@ void
 logging_configure(Context & context)
 {
   rcl_allocator_t allocator = rcl_get_default_allocator();
+  auto native_context = context.rcl_handle();
 
   rclpy::LoggingGuard scoped_logging_guard;
   rcl_ret_t ret = rcl_logging_configure_with_output_handler(
-    &context.rcl_ptr()->global_arguments,
+    &native_context->global_arguments,
     &allocator,
     rclpy_thread_safe_logging_output_handler);
   if (RCL_RET_OK != ret) {

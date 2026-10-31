@@ -23,6 +23,8 @@
 #include <rmw/types.h>
 
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "publisher.hpp"
 
@@ -30,6 +32,33 @@ namespace py = pybind11;
 
 namespace rclpy
 {
+
+/// Own an immutable Python snapshot and native UTF-8 storage for CLI parsing.
+class CliArguments
+{
+public:
+  explicit CliArguments(py::object arguments);
+  CliArguments(const CliArguments &) = delete;
+  CliArguments & operator=(const CliArguments &) = delete;
+
+  int argc() const
+  {
+    return static_cast<int>(values_.size());
+  }
+  const char * const * argv() const
+  {
+    return values_.empty() ? nullptr : values_.data();
+  }
+  const py::tuple & snapshot() const
+  {
+    return python_;
+  }
+
+private:
+  py::tuple python_;
+  std::vector<std::string> storage_;
+  std::vector<const char *> values_;
+};
 
 typedef void destroy_ros_message_function (void *);
 
@@ -118,7 +147,7 @@ remove_ros_args(py::object pycli_args);
 
 /// Throw UnparsedROSArgsError with a message saying which args are unparsed.
 void
-throw_if_unparsed_ros_args(py::list pyargs, const rcl_arguments_t & rcl_args);
+throw_if_unparsed_ros_args(py::sequence pyargs, const rcl_arguments_t & rcl_args);
 
 /// Fetch a predefined qos_profile from rcl_action and convert it to a Python QoSProfile object.
 /**

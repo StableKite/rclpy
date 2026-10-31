@@ -414,34 +414,14 @@ Node::Node(
   rcl_ret_t ret;
   rcl_arguments_t arguments = rcl_get_zero_initialized_arguments();
 
-  // turn the arguments into an array of C-style strings
-  std::vector<const char *> arg_values;
-  const char ** const_arg_values = nullptr;
-  py::list pyargs;
-  if (!pycli_args.is_none()) {
-    pyargs = pycli_args;
-    if (!pyargs.empty()) {
-      arg_values.resize(pyargs.size());
-      for (size_t i = 0; i < pyargs.size(); ++i) {
-        // CPython owns const char * memory - no need to free it
-        arg_values[i] = PyUnicode_AsUTF8(pyargs[i].ptr());
-        if (!arg_values[i]) {
-          throw py::error_already_set();
-        }
-      }
-      const_arg_values = &(arg_values[0]);
-    }
-  }
+  CliArguments cli_arguments(pycli_args);
 
   // call rcl_parse_arguments() so rcl_arguments_t structure is always valid.
   // Otherwise the remapping functions will error if the user passes no arguments to a node and sets
   // use_global_arguments to False.
   rcl_allocator_t allocator = rcl_get_default_allocator();
-  if (arg_values.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-    throw py::value_error("too many cli arguments given to node");
-  }
-  int num_args = static_cast<int>(arg_values.size());
-  ret = rcl_parse_arguments(num_args, const_arg_values, allocator, &arguments);
+  ret = rcl_parse_arguments(
+    cli_arguments.argc(), cli_arguments.argv(), allocator, &arguments);
 
   if (RCL_RET_INVALID_ROS_ARGS == ret) {
     throw RCLInvalidROSArgsError("Failed to parse ROS arguments");
@@ -461,7 +441,7 @@ Node::Node(
       }
     });
 
-  throw_if_unparsed_ros_args(pyargs, arguments);
+  throw_if_unparsed_ros_args(cli_arguments.snapshot(), arguments);
 
   rcl_node_ = std::shared_ptr<rcl_node_t>(
     new rcl_node_t,
