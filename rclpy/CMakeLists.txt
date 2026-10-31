@@ -168,6 +168,18 @@ if(BUILD_TESTING)
   target_include_directories(test_python_allocator PRIVATE src/rclpy)
   target_link_libraries(test_python_allocator pybind11::embed)
 
+  find_package(Threads REQUIRED)
+  add_executable(test_destroyable_threading
+    test/test_destroyable_threading.cpp
+    src/rclpy/destroyable.cpp
+    src/rclpy/exceptions.cpp)
+  target_include_directories(test_destroyable_threading PRIVATE src/rclpy)
+  target_link_libraries(test_destroyable_threading PRIVATE
+    pybind11::embed Threads::Threads rcl::rcl rcutils::rcutils rmw::rmw)
+  set_target_properties(test_destroyable_threading PROPERTIES CXX_STANDARD 20)
+  add_test(NAME test_destroyable_threading COMMAND test_destroyable_threading)
+  set_tests_properties(test_destroyable_threading PROPERTIES TIMEOUT 60)
+
   if(NOT _typesupport_impls STREQUAL "")
     # Run each test in its own pytest invocation to isolate any global state in rclpy
     set(_rclpy_pytest_tests
