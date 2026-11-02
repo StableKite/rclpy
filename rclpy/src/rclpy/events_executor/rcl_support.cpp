@@ -36,7 +36,12 @@ RclCallbackManager::~RclCallbackManager()
 {
   // Should not still have any callbacks registered when we exit, because otherwise RCL can call
   // pointers that will no longer be valid.  We can't throw an exception here, but we can explode.
-  if (!owned_cbs_.empty()) {
+  bool callbacks_remaining;
+  {
+    std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    callbacks_remaining = !owned_cbs_.empty();
+  }
+  if (callbacks_remaining) {
     py::gil_scoped_acquire gil_acquire;
     py::print("Destroying callback manager with callbacks remaining");
     ::abort();
@@ -48,32 +53,56 @@ const void * RclCallbackManager::MakeCallback(
 {
   // We don't support replacing an existing callback with a new one, because it gets tricky making
   // sure we don't delete an old callback while the middleware still holds a pointer to it.
-  if (owned_cbs_.count(key) != 0) {
-    throw py::key_error("Attempt to replace existing callback");
-  }
   CbEntry new_entry;
+  new_entry.state = std::make_shared<CallbackState>();
+  new_entry.state->invocation = std::make_shared<Invocation>(
+    Invocation{std::move(callback), std::move(with)});
+  auto state = new_entry.state;
+  auto queue = events_queue_;
   new_entry.cb =
-    std::make_unique<std::function<void(size_t)>>([this, callback, key](size_t number_of_events) {
-        events_queue_->Enqueue([this, callback, key, number_of_events]() {
-          if (!owned_cbs_.count(key)) {
-            // This callback has been removed, just drop it as the objects it may want to touch may
-            // no longer exist.
-            return;
+    std::make_unique<std::function<void(size_t)>>([queue, state](size_t number_of_events) {
+        queue->Enqueue([state, number_of_events]() {
+          std::shared_ptr<Invocation> invocation;
+          {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            invocation = state->invocation;
           }
-          callback(number_of_events);
+          if (invocation) {
+            // No manager pointer, map lookup, or native mutex may survive into
+            // user code. Removal can retire this registration concurrently.
+            invocation->callback(number_of_events);
+          }
       });
     });
-  new_entry.with = with;
   const void * ret = new_entry.cb.get();
-  owned_cbs_[key] = std::move(new_entry);
+  {
+    std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    if (!owned_cbs_.try_emplace(key, std::move(new_entry)).second) {
+      throw py::key_error("Attempt to replace existing callback");
+    }
+  }
   return ret;
 }
 
 void RclCallbackManager::RemoveCallback(const void * key)
 {
-  if (!owned_cbs_.erase(key)) {
-    throw py::key_error("Attempt to remove nonexistent callback");
+  CbEntry removed;
+  {
+    std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    auto it = owned_cbs_.find(key);
+    if (it == owned_cbs_.end()) {
+      throw py::key_error("Attempt to remove nonexistent callback");
+    }
+    removed = std::move(it->second);
+    owned_cbs_.erase(it);
   }
+  std::shared_ptr<Invocation> retired;
+  {
+    std::lock_guard<std::mutex> lock(removed.state->mutex);
+    retired = std::move(removed.state->invocation);
+  }
+  // Both the Python context exit and callback capture destruction run outside
+  // native mutexes. An in-flight event retains its own invocation/owner lease.
 }
 
 }  // namespace events_executor
