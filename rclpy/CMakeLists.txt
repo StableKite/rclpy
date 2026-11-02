@@ -104,6 +104,7 @@ pybind11_add_module(_rclpy_pybind11
   src/rclpy/service_info.cpp
   src/rclpy/service_introspection.cpp
   src/rclpy/signal_handler.cpp
+  src/rclpy/scoped_signal_callback.cpp
   src/rclpy/subscription.cpp
   src/rclpy/time_point.cpp
   src/rclpy/timer.cpp
@@ -179,6 +180,20 @@ if(BUILD_TESTING)
   set_target_properties(test_destroyable_threading PROPERTIES CXX_STANDARD 20)
   add_test(NAME test_destroyable_threading COMMAND test_destroyable_threading)
   set_tests_properties(test_destroyable_threading PROPERTIES TIMEOUT 60)
+
+  if(Python3_SOABI MATCHES "(cp[0-9]+t|cpython-[0-9]+t)")
+    add_executable(test_scoped_signal_callback
+      test/test_scoped_signal_callback.cpp
+      src/rclpy/scoped_signal_callback.cpp)
+    target_include_directories(test_scoped_signal_callback PRIVATE src/rclpy)
+    target_link_libraries(test_scoped_signal_callback PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_scoped_signal_callback PROPERTIES CXX_STANDARD 17)
+    if(WIN32)
+      target_compile_definitions(test_scoped_signal_callback PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_scoped_signal_callback COMMAND test_scoped_signal_callback)
+    set_tests_properties(test_scoped_signal_callback PROPERTIES TIMEOUT 60)
+  endif()
 
   if(NOT _typesupport_impls STREQUAL "")
     # Run each test in its own pytest invocation to isolate any global state in rclpy

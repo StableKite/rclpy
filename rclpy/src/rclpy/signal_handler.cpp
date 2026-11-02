@@ -24,7 +24,6 @@
 #include <algorithm>
 #include <atomic>
 #include <csignal>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -49,7 +48,6 @@
 namespace py = pybind11;
 
 static bool trigger_guard_conditions();
-static void invoke_callbacks();
 
 namespace
 {
@@ -153,7 +151,7 @@ setup_deferred_signal_handler()
           // to ensure the callbacks see the shut down state, and we don't end up going back to
           // spin again.  But I'm not sure why the same argument doesn't hold for the guard
           // conditions above.
-          invoke_callbacks();
+          rclpy::detail::invoke_signal_callbacks();
         }
       }
     });
@@ -536,48 +534,9 @@ uninstall_signal_handlers()
   teardown_deferred_signal_handler();
 }
 
-// Storage for signal callbacks.
-// TODO(bmartin427) The management of g_guard_conditions seems overly complex.  That variable is
-// never touched directly from a signal handler as it has a separate thread on which the guard
-// conditions are triggered; however, there's an awful lot of code jumping through hoops that seem
-// unnecessary with that in mind.  I won't model the same behavior for the registered callbacks.
-std::list<std::function<void()>> g_callbacks;
-std::mutex g_callback_mutex;
-class ScopedSignalCallback::Impl
-{
-public:
-  explicit Impl(std::function<void()> callback)
-  {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
-    iterator_ = g_callbacks.insert(g_callbacks.end(), callback);
-  }
-
-  ~Impl()
-  {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
-    g_callbacks.erase(iterator_);
-  }
-
-private:
-  std::list<std::function<void()>>::iterator iterator_;
-};
-
-ScopedSignalCallback::ScopedSignalCallback(std::function<void()> cb)
-: impl_(std::make_shared<Impl>(cb))
-{
-}
-
-ScopedSignalCallback::~ScopedSignalCallback() {}
 
 }  // namespace rclpy
 
-static void invoke_callbacks()
-{
-  std::lock_guard<std::mutex> lock(rclpy::g_callback_mutex);
-  for (auto & cb : rclpy::g_callbacks) {
-    cb();
-  }
-}
 
 namespace rclpy
 {
