@@ -237,16 +237,6 @@ void notify_from_signal() noexcept
 
 #define SIGNAL_HANDLER_T struct sigaction
 
-static SIGNAL_HANDLER_T
-make_null_signal_handler()
-{
-  SIGNAL_HANDLER_T handler;
-  memset(&handler, 0, sizeof(handler));
-  return handler;
-}
-
-#define NULL_SIGNAL_HANDLER make_null_signal_handler()
-
 #define DEFINE_SIGNAL_HANDLER(name) \
   static void _ ## name(int signum, siginfo_t * info, void * context); \
   static SIGNAL_HANDLER_T get_ ## name() { \

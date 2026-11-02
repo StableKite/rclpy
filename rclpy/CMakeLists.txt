@@ -200,12 +200,25 @@ if(BUILD_TESTING)
       src/rclpy/logging_guard.cpp)
     target_include_directories(test_logging_guard PRIVATE src/rclpy)
     target_link_libraries(test_logging_guard PRIVATE pybind11::embed Threads::Threads)
-    set_target_properties(test_logging_guard PROPERTIES CXX_STANDARD 17)
+    set_target_properties(test_logging_guard PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
     if(WIN32)
       target_compile_definitions(test_logging_guard PRIVATE Py_GIL_DISABLED=1)
     endif()
     add_test(NAME test_logging_guard COMMAND test_logging_guard)
     set_tests_properties(test_logging_guard PROPERTIES TIMEOUT 60)
+
+    add_executable(test_python_identity_map test/test_python_identity_map.cpp)
+    target_include_directories(test_python_identity_map PRIVATE src/rclpy)
+    target_link_libraries(test_python_identity_map PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_python_identity_map PROPERTIES CXX_STANDARD 17)
+    if(WIN32)
+      target_compile_definitions(test_python_identity_map PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_python_identity_map COMMAND test_python_identity_map)
+    set_tests_properties(test_python_identity_map PROPERTIES TIMEOUT 60)
   endif()
 
   if(NOT _typesupport_impls STREQUAL "")

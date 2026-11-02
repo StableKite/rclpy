@@ -32,6 +32,17 @@ struct PythonHasher
     return pybind11::hash(handle);
   }
 };
+
+/// Preserve the identity comparison historically used by pybind11::handle's
+/// deprecated operator==. Python rich comparison could invoke user code and
+/// would merge distinct executor entities that happen to compare equal.
+struct PythonIdentityEqual
+{
+  bool operator()(const pybind11::handle & left, const pybind11::handle & right) const noexcept
+  {
+    return left.is(right);
+  }
+};
 }  // namespace events_executor
 }  // namespace rclpy
 
