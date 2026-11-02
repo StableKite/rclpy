@@ -28,6 +28,7 @@
 
 #include <rcpputils/scope_exit.hpp>
 
+#include "cleanup_warning.hpp"
 #include "action_server.hpp"
 #include "clock.hpp"
 #include "exceptions.hpp"
@@ -80,11 +81,8 @@ ActionServer::ActionServer(
       // Intentionally capture node by value so shared_ptr can be transferred to copies
       rcl_ret_t ret = rcl_action_server_fini(action_server, node.rcl_ptr());
       if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini publisher: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "action server", rcl_get_error_string().str);
         rcl_reset_error();
       }
       delete action_server;
@@ -203,10 +201,8 @@ ActionServer::publish_status()
       ret = rcl_action_goal_status_array_fini(&status_message);
 
       if (RCL_RET_OK != ret) {
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to finalize goal status array: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "finalize", "goal status array", rcl_get_error_string().str);
         rcl_reset_error();
       }
     });
@@ -329,10 +325,8 @@ ActionServer::process_cancel_request(
       ret = rcl_action_cancel_response_fini(&cancel_response);
 
       if (RCL_RET_OK != ret) {
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to finalize cancel response: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "finalize", "cancel response", rcl_get_error_string().str);
         rcl_reset_error();
       }
     });

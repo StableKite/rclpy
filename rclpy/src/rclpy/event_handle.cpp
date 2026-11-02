@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cleanup_warning.hpp"
 #include "event_handle.hpp"
 #include "exceptions.hpp"
 
@@ -37,11 +38,8 @@ create_zero_initialized_event()
     {
       rcl_ret_t ret = rcl_event_fini(event);
       if (RCL_RET_OK != ret) {
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level,
-          "failed to fini event: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "event", rcl_get_error_string().str);
         rcl_reset_error();
       }
       delete event;

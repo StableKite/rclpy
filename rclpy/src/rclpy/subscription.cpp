@@ -30,6 +30,7 @@
 
 #include <rcpputils/scope_exit.hpp>
 
+#include "cleanup_warning.hpp"
 #include "exceptions.hpp"
 #include "node.hpp"
 #include "serialization.hpp"
@@ -80,11 +81,8 @@ Subscription::Subscription(
       // Intentionally capture node by copy so shared_ptr can be transferred to copies
       rcl_ret_t ret = rcl_subscription_fini(subscription, node.rcl_ptr());
       if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini subscription: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "subscription", rcl_get_error_string().str);
         rcl_reset_error();
       }
       delete subscription;

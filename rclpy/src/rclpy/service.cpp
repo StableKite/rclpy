@@ -23,6 +23,7 @@
 #include <memory>
 #include <string>
 
+#include "cleanup_warning.hpp"
 #include "clock.hpp"
 #include "exceptions.hpp"
 #include "node.hpp"
@@ -64,11 +65,8 @@ Service::Service(
       // Intentionally capture node by copy so shared_ptr can be transferred to copies
       rcl_ret_t ret = rcl_service_fini(service, node.rcl_ptr());
       if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini service: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "service", rcl_get_error_string().str);
         rcl_reset_error();
       }
       delete service;

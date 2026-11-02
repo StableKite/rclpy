@@ -66,21 +66,10 @@ auto native_context_call(std::mutex & mutex, Function && function)
 
 void warn_context_cleanup(const char * action)
 {
-  if (python_thread_attached()) {
-    PyErr_WarnFormat(
-      PyExc_RuntimeWarning, 1, "failed to %s rcl_context_t: %s",
-      action, rcl_get_error_string().str);
-  } else {
-    // A native shutdown snapshot may release the last owner on its worker.
-    // Report the error without calling Python from an unattached thread.
-    RCUTILS_SAFE_FWRITE_TO_STDERR("rclpy context cleanup failed: ");
-    RCUTILS_SAFE_FWRITE_TO_STDERR(action);
-    RCUTILS_SAFE_FWRITE_TO_STDERR(": ");
-    RCUTILS_SAFE_FWRITE_TO_STDERR(rcl_get_error_string().str);
-    RCUTILS_SAFE_FWRITE_TO_STDERR("\n");
-  }
+  warn_cleanup_error(action, "rcl_context_t", rcl_get_error_string().str);
   rcl_reset_error();
 }
+
 }  // namespace
 
 struct ContextState

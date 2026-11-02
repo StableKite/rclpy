@@ -36,6 +36,7 @@
 #include <rcpputils/find_and_replace.hpp>
 #include <rcpputils/scope_exit.hpp>
 
+#include "cleanup_warning.hpp"
 #include "exceptions.hpp"
 #include "logging.hpp"
 #include "node.hpp"
@@ -183,32 +184,20 @@ Node::get_names_impl(bool get_enclaves)
     {
       rcutils_ret_t fini_ret = rcutils_string_array_fini(&node_names);
       if (RCUTILS_RET_OK != fini_ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level,
-          "[rclpy| %s : %s ]: failed to fini node names during error handling: %s",
-          RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "node names during error handling", rcl_get_error_string().str);
         rcl_reset_error();
       }
       fini_ret = rcutils_string_array_fini(&node_namespaces);
       if (RCUTILS_RET_OK != fini_ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level,
-          "[rclpy| %s : %s ]: failed to fini node namespaces during error handling: %s",
-          RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "node namespaces during error handling", rcl_get_error_string().str);
         rcl_reset_error();
       }
       fini_ret = rcutils_string_array_fini(&enclaves);
       if (RCUTILS_RET_OK != fini_ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level,
-          "[rclpy| %s : %s ]: failed to fini enclaves string array during error handling: %s",
-          RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "enclaves string array during error handling", rcl_get_error_string().str);
         rcl_reset_error();
       }
     });
@@ -458,10 +447,8 @@ Node::Node(
   RCPPUTILS_SCOPE_EXIT(
     {
       if (RCL_RET_OK != rcl_arguments_fini(&arguments)) {
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini arguments: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "arguments", rcl_get_error_string().str);
         rcl_reset_error();
       }
     });

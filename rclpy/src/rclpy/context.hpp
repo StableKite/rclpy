@@ -23,6 +23,7 @@
 
 #include <memory>
 
+#include "cleanup_warning.hpp"
 #include "destroyable.hpp"
 #include "exceptions.hpp"
 
@@ -47,11 +48,8 @@ struct InitOptions
   {
     rcl_ret_t ret = rcl_init_options_fini(&rcl_options);
     if (RCL_RET_OK != ret) {
-      int stack_level = 1;
-      PyErr_WarnFormat(
-        PyExc_RuntimeWarning, stack_level,
-        "[rclpy| %s : %s ]: failed to fini rcl_init_options_t in destructor: %s",
-        RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+      warn_cleanup_error(
+        "fini", "rcl_init_options_t in destructor", rcl_get_error_string().str);
       rcl_reset_error();
     }
   }

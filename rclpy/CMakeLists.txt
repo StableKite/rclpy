@@ -324,6 +324,32 @@ if(BUILD_TESTING)
     set_tests_properties(test_events_task_ownership PROPERTIES TIMEOUT 60)
     set_tests_properties(test_events_task_ownership_debug PROPERTIES
       TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
+
+    add_executable(test_native_cleanup_warning
+      test/test_native_cleanup_warning.cpp src/rclpy/exceptions.cpp)
+    target_include_directories(test_native_cleanup_warning PRIVATE src/rclpy)
+    target_link_libraries(test_native_cleanup_warning PRIVATE
+      pybind11::embed rcl::rcl rcl_action::rcl_action Threads::Threads)
+    set_target_properties(test_native_cleanup_warning PROPERTIES
+      CXX_STANDARD 17 CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_native_cleanup_warning PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    if(MSVC)
+      target_compile_options(test_native_cleanup_warning PRIVATE /W4 /WX)
+    else()
+      target_compile_options(test_native_cleanup_warning PRIVATE -Wall -Wextra -Werror)
+    endif()
+    foreach(_cleanup_mode IN ITEMS error normal preserve foreign finalized)
+      add_test(NAME test_cleanup_warning_${_cleanup_mode}
+        COMMAND test_native_cleanup_warning ${_cleanup_mode})
+      add_test(NAME test_cleanup_warning_${_cleanup_mode}_debug
+        COMMAND test_native_cleanup_warning ${_cleanup_mode})
+      set_tests_properties(test_cleanup_warning_${_cleanup_mode} PROPERTIES TIMEOUT 60)
+      set_tests_properties(test_cleanup_warning_${_cleanup_mode}_debug PROPERTIES
+        TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
+    endforeach()
+
   endif()
 
   if(NOT _typesupport_impls STREQUAL "")
