@@ -290,6 +290,22 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_events_clock_threading COMMAND test_events_clock_threading)
     set_tests_properties(test_events_clock_threading PROPERTIES TIMEOUT 60)
+
+    add_executable(test_python_allocator_threading test/test_python_allocator_threading.cpp)
+    target_include_directories(test_python_allocator_threading PRIVATE src/rclpy)
+    target_link_libraries(test_python_allocator_threading PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_python_allocator_threading PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_python_allocator_threading PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_python_allocator_threading COMMAND test_python_allocator_threading)
+    add_test(NAME test_python_allocator_threading_debug COMMAND test_python_allocator_threading)
+    set_tests_properties(test_python_allocator_threading PROPERTIES TIMEOUT 60)
+    set_tests_properties(test_python_allocator_threading_debug PROPERTIES
+      TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
   endif()
 
   if(NOT _typesupport_impls STREQUAL "")

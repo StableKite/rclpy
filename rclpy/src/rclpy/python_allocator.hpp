@@ -17,15 +17,18 @@
 
 #include <pybind11/pybind11.h>
 
-#include <stdexcept>
+#include <cstddef>
+#include <limits>
+#include <new>
 
 namespace rclpy
 {
 //----------- Declaration ----------
 
-/// Allocate memory using Python's allocator
+/// Allocate native C/C++ storage using Python's raw memory allocator.
 /**
- * \warning The GIL must be held while the allocator is used.
+ * Native resource leases may be released on an unattached worker thread.
+ * The raw domain supports that lifetime; this allocator is not for PyObjects.
  */
 template<class T>
 struct PythonAllocator
@@ -53,7 +56,10 @@ constexpr bool operator!=(const PythonAllocator<T> &, const PythonAllocator<U> &
 template<class T>
 T * PythonAllocator<T>::allocate(std::size_t n)
 {
-  T * ptr = static_cast<T *>(PyMem_Malloc(n * sizeof(T)));
+  if (n > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+    throw std::bad_array_new_length();
+  }
+  T * ptr = static_cast<T *>(PyMem_RawMalloc(n * sizeof(T)));
   if (nullptr == ptr) {
     throw std::bad_alloc();
   }
@@ -63,7 +69,7 @@ T * PythonAllocator<T>::allocate(std::size_t n)
 template<class T>
 void PythonAllocator<T>::deallocate(T * p, std::size_t /* n */)
 {
-  PyMem_Free(p);
+  PyMem_RawFree(p);
 }
 
 template<class T, class U>
