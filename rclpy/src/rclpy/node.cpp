@@ -24,6 +24,7 @@
 #include <rcl_yaml_param_parser/parser.h>
 #include <rcutils/format_string.h>
 
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <regex>
@@ -42,6 +43,30 @@
 
 namespace rclpy
 {
+namespace
+{
+void warn_node_cleanup(const char * action, const char * error) noexcept
+{
+#if PY_VERSION_HEX >= 0x030D0000
+  const bool attached = Py_IsInitialized() && PyThreadState_GetUnchecked() != nullptr;
+#else
+  const bool attached = Py_IsInitialized() && PyGILState_Check();
+#endif
+  if (attached) {
+    PyObject * type = nullptr;
+    PyObject * value = nullptr;
+    PyObject * traceback = nullptr;
+    PyErr_Fetch(&type, &value, &traceback);
+    if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1, "Failed to %s: %s", action, error) < 0) {
+      PyErr_WriteUnraisable(Py_None);
+    }
+    PyErr_Restore(type, value, traceback);
+  } else {
+    std::fprintf(stderr, "rclpy failed to %s: %s\n", action, error);
+  }
+}
+}  // namespace
+
 const char *
 Node::get_fully_qualified_name()
 {
@@ -443,35 +468,43 @@ Node::Node(
 
   throw_if_unparsed_ros_args(cli_arguments.snapshot(), arguments);
 
+  struct Initialization
+  {
+    bool node = false;
+    bool rosout = false;
+  };
+  auto initialized = std::make_shared<Initialization>();
+  auto native_context = context.rcl_handle();
   rcl_node_ = std::shared_ptr<rcl_node_t>(
     new rcl_node_t,
-    [enable_rosout](rcl_node_t * node)
+    [initialized, native_context](rcl_node_t * node)
     {
-      rcl_ret_t ret;
-      {
+      // The allocation itself retains its native context through SDK fini.
+      (void)native_context;
+      rcl_error_string_t rosout_error{};
+      rcl_error_string_t node_error{};
+      if (initialized->rosout) {
         rclpy::LoggingGuard scoped_logging_guard;
-        if (rcl_logging_rosout_enabled() && enable_rosout) {
-          ret = rcl_logging_rosout_fini_publisher_for_node(node);
-          if (ret != RCL_RET_OK) {
-            // Warning should use line number of the current stack frame
-            int stack_level = 1;
-            PyErr_WarnFormat(
-              PyExc_RuntimeWarning, stack_level, "Failed to fini rosout publisher: %s",
-              rcl_get_error_string().str);
+        if (rcl_logging_rosout_enabled()) {
+          if (rcl_logging_rosout_fini_publisher_for_node(node) != RCL_RET_OK) {
+            rosout_error = rcl_get_error_string();
             rcl_reset_error();
           }
         }
       }
-      ret = rcl_node_fini(node);
-      if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini node: %s",
-          rcl_get_error_string().str);
+      if (initialized->node && rcl_node_fini(node) != RCL_RET_OK) {
+        node_error = rcl_get_error_string();
         rcl_reset_error();
       }
       delete node;
+      // LoggingGuard has unlocked and restored Python state before warnings
+      // can run arbitrary Python warning handlers or trigger collection.
+      if (rosout_error.str[0]) {
+        warn_node_cleanup("fini rosout publisher", rosout_error.str);
+      }
+      if (node_error.str[0]) {
+        warn_node_cleanup("fini node", node_error.str);
+      }
     });
 
   *rcl_node_ = rcl_get_zero_initialized_node();
@@ -496,12 +529,16 @@ Node::Node(
   if (RCL_RET_OK != ret) {
     throw RCLError("error creating node");
   }
+  initialized->node = true;
 
-  if (rcl_logging_rosout_enabled() && enable_rosout) {
+  if (enable_rosout) {
     rclpy::LoggingGuard scoped_logging_guard;
-    ret = rcl_logging_rosout_init_publisher_for_node(rcl_node_.get());
-    if (ret != RCL_RET_OK) {
-      throw RCLError("failed to initialize rosout publisher");
+    if (rcl_logging_rosout_enabled()) {
+      ret = rcl_logging_rosout_init_publisher_for_node(rcl_node_.get());
+      if (ret != RCL_RET_OK) {
+        throw RCLError("failed to initialize rosout publisher");
+      }
+      initialized->rosout = true;
     }
   }
 }

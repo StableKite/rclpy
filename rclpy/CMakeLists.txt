@@ -94,6 +94,7 @@ pybind11_add_module(_rclpy_pybind11
   src/rclpy/guard_condition.cpp
   src/rclpy/lifecycle.cpp
   src/rclpy/logging.cpp
+  src/rclpy/logging_guard.cpp
   src/rclpy/names.cpp
   src/rclpy/node.cpp
   src/rclpy/publisher.cpp
@@ -193,6 +194,18 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_scoped_signal_callback COMMAND test_scoped_signal_callback)
     set_tests_properties(test_scoped_signal_callback PROPERTIES TIMEOUT 60)
+
+    add_executable(test_logging_guard
+      test/test_logging_guard.cpp
+      src/rclpy/logging_guard.cpp)
+    target_include_directories(test_logging_guard PRIVATE src/rclpy)
+    target_link_libraries(test_logging_guard PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_logging_guard PROPERTIES CXX_STANDARD 17)
+    if(WIN32)
+      target_compile_definitions(test_logging_guard PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_logging_guard COMMAND test_logging_guard)
+    set_tests_properties(test_logging_guard PROPERTIES TIMEOUT 60)
   endif()
 
   if(NOT _typesupport_impls STREQUAL "")
@@ -220,6 +233,7 @@ if(BUILD_TESTING)
       test/test_signals_threading.py
       test/test_lifecycle.py
       test/test_logging.py
+      test/test_logging_threading.py
       test/test_logging_rosout.py
       test/test_logging_service.py
       test/test_messages.py

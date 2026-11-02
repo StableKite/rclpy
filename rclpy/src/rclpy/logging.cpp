@@ -24,19 +24,12 @@
 #include <mutex>
 #include <stdexcept>
 
+#include "context.hpp"
 #include "exceptions.hpp"
 #include "logging.hpp"
 
 namespace rclpy
 {
-LoggingGuard::LoggingGuard()
-: guard_(logging_mutex_)
-{
-}
-
-// Initialize logging mutex
-std::recursive_mutex LoggingGuard::logging_mutex_;
-
 static
 void
 rclpy_thread_safe_logging_output_handler(
