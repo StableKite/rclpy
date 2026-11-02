@@ -18,6 +18,8 @@
 #include <rcl/guard_condition.h>
 #include <rcl/types.h>
 
+#include <atomic>
+#include <cstdio>
 #include <memory>
 
 #include "context.hpp"
@@ -26,46 +28,79 @@
 
 namespace rclpy
 {
-GuardCondition::GuardCondition(Context & context)
-: context_(context)
+class GuardConditionState
 {
-  rcl_guard_condition_ = std::shared_ptr<rcl_guard_condition_t>(
-    new rcl_guard_condition_t,
-    [](rcl_guard_condition_t * guard_condition)
-    {
-      rcl_ret_t ret = rcl_guard_condition_fini(guard_condition);
-      if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini guard condition: %s",
-          rcl_get_error_string().str);
-        rcl_reset_error();
-      }
-      delete guard_condition;
-    });
-
-  *rcl_guard_condition_ = rcl_get_zero_initialized_guard_condition();
-  rcl_guard_condition_options_t gc_options = rcl_guard_condition_get_default_options();
-
-  rcl_ret_t ret = rcl_guard_condition_init(
-    rcl_guard_condition_.get(), context.rcl_ptr(), gc_options);
-  if (RCL_RET_OK != ret) {
-    throw RCLError("failed to create guard_condition");
+public:
+  explicit GuardConditionState(Context & owner)
+  : context(owner.rcl_handle())
+  {
+    auto options = rcl_guard_condition_get_default_options();
+    if (RCL_RET_OK != rcl_guard_condition_init(&guard, context.get(), options)) {
+      throw RCLError("failed to create guard_condition");
+    }
+    initialized = true;
   }
+
+  ~GuardConditionState()
+  {
+    if (initialized && RCL_RET_OK != rcl_guard_condition_fini(&guard)) {
+#if PY_VERSION_HEX >= 0x030D0000
+      const bool attached = Py_IsInitialized() && PyThreadState_GetUnchecked() != nullptr;
+#else
+      const bool attached = Py_IsInitialized() && PyGILState_Check();
+#endif
+      if (attached) {
+        py::error_scope preserve;
+        if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1, "Failed to fini guard condition: %s",
+            rcl_get_error_string().str) < 0)
+        {
+          PyErr_WriteUnraisable(Py_None);
+        }
+      } else {
+        std::fprintf(stderr, "rclpy guard condition cleanup failed: %s\n",
+          rcl_get_error_string().str);
+      }
+      rcl_reset_error();
+    }
+  }
+
+  std::shared_ptr<rcl_context_t> context;
+  rcl_guard_condition_t guard = rcl_get_zero_initialized_guard_condition();
+  bool initialized = false;
+};
+
+GuardCondition::GuardCondition(Context & context)
+: state_(std::make_shared<GuardConditionState>(context)) {}
+
+GuardCondition::GuardCondition(const GuardCondition & other)
+: Destroyable(other), std::enable_shared_from_this<GuardCondition>(),
+  state_(std::atomic_load(&other.state_)) {}
+
+std::shared_ptr<rcl_guard_condition_t> GuardCondition::rcl_handle() const
+{
+  auto state = std::atomic_load(&state_);
+  if (!state) {
+    throw InvalidHandle("cannot use a destroyed guard condition");
+  }
+  return std::shared_ptr<rcl_guard_condition_t>(state, &state->guard);
+}
+
+rcl_guard_condition_t * GuardCondition::rcl_ptr() const
+{
+  return rcl_handle().get();
 }
 
 void
 GuardCondition::destroy()
 {
-  rcl_guard_condition_.reset();
-  context_.destroy();
+  std::atomic_store(&state_, std::shared_ptr<GuardConditionState>());
 }
 
 void
 GuardCondition::trigger_guard_condition()
 {
-  rcl_ret_t ret = rcl_trigger_guard_condition(rcl_guard_condition_.get());
+  auto guard = rcl_handle();
+  rcl_ret_t ret = rcl_trigger_guard_condition(guard.get());
 
   if (RCL_RET_OK != ret) {
     throw RCLError("failed to trigger guard condition");

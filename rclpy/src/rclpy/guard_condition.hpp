@@ -23,12 +23,12 @@
 
 #include "context.hpp"
 #include "destroyable.hpp"
-#include "utils.hpp"
 
 namespace py = pybind11;
 
 namespace rclpy
 {
+class GuardConditionState;
 /// Create a general purpose guard condition
 class GuardCondition : public Destroyable, public std::enable_shared_from_this<GuardCondition>
 {
@@ -37,6 +37,7 @@ public:
    * Raises RuntimeError if initializing the guard condition fails
    */
   explicit GuardCondition(Context & context);
+  GuardCondition(const GuardCondition & other);
 
   /// Trigger a general purpose guard condition
   /**
@@ -47,25 +48,16 @@ public:
   trigger_guard_condition();
 
   /// Get rcl_guard_condition_t pointer
-  rcl_guard_condition_t * rcl_ptr() const
-  {
-    return rcl_guard_condition_.get();
-  }
+  rcl_guard_condition_t * rcl_ptr() const;
+
+  /// Keep the guard and its native context alive during a deferred trigger.
+  std::shared_ptr<rcl_guard_condition_t> rcl_handle() const;
 
   /// Force an early destruction of this object
   void destroy() override;
 
 private:
-  Context context_;
-  std::shared_ptr<rcl_guard_condition_t> rcl_guard_condition_;
-
-  /// Handle destructor for guard condition
-  static void
-  _rclpy_destroy_guard_condition(void * p)
-  {
-    (void)p;
-    // Empty destructor, the class should take care of the lifecycle.
-  }
+  std::shared_ptr<GuardConditionState> state_;
 };
 
 /// Define a pybind11 wrapper for an rclpy::GuardCondition
