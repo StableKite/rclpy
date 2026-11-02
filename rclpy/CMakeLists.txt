@@ -206,6 +206,7 @@ if(BUILD_TESTING)
       test/test_clock.py
       test/test_clock_threading.py
       test/test_context.py
+      test/test_context_threading.py
       test/test_create_node.py
       test/test_create_while_spinning.py
       test/test_destruction.py

@@ -61,6 +61,10 @@ class Context(ContextManager['Context']):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Serialize complete shutdown transactions while letting callbacks use
+        # the context state lock (including from another thread).
+        self._shutdown_lock = threading.RLock()
+        self._cleanup_active = False
         self._callbacks: List[Union['WeakMethod[MethodType]', Callable[[], None]]] = []
         self._logging_initialized = False
         self.__context: Optional[ContextHandle] = None
@@ -70,8 +74,11 @@ class Context(ContextManager['Context']):
         return self.__context
 
     def destroy(self) -> None:
-        if self.__context:
-            self.__context.destroy_when_not_in_use()
+        with self._shutdown_lock:
+            with self._lock:
+                context = self.__context
+            if context:
+                context.destroy_when_not_in_use()
 
     def init(self,
              args: Optional[List[str]] = None,
@@ -115,55 +122,81 @@ class Context(ContextManager['Context']):
                 return self.__context.ok()
 
     def _call_on_shutdown_callbacks(self) -> None:
-        for weak_method in self._callbacks:
+        with self._lock:
+            callbacks = self._callbacks
+            self._callbacks = []
+        for weak_method in callbacks:
             callback = weak_method()
             if callback is not None:
                 callback()
-        self._callbacks = []
 
     def shutdown(self) -> None:
         """Shutdown this context."""
-        if self.__context is None:
-            raise RuntimeError('Context must be initialized before it can be shutdown')
-        with self.__context, self._lock:
-            self.__context.shutdown()
-            self._call_on_shutdown_callbacks()
-            self._logging_fini()
+        self._shutdown(try_only=False)
 
     def try_shutdown(self) -> None:
         """Shutdown this context, if not already shutdown."""
-        if self.__context is None:
-            return
-        with self.__context, self._lock:
-            if self.__context.ok():
-                self.__context.shutdown()
-                self._call_on_shutdown_callbacks()
-                self._logging_fini()
+        self._shutdown(try_only=True)
+
+    def _shutdown(self, *, try_only: bool) -> None:
+        with self._shutdown_lock:
+            with self._lock:
+                context = self.__context
+                if context is None:
+                    if try_only:
+                        return
+                    raise RuntimeError('Context must be initialized before it can be shutdown')
+                if try_only and self._cleanup_active:
+                    # A callback may request idempotent shutdown recursively.
+                    return
+            with context:
+                with self._lock:
+                    if not try_only or context.ok():
+                        context.shutdown()
+                    self._cleanup_active = True
+                try:
+                    # Also required when the native signal worker already
+                    # stopped RCL. User code never runs under the state lock.
+                    self._call_on_shutdown_callbacks()
+                finally:
+                    with self._lock:
+                        try:
+                            self._logging_fini()
+                        finally:
+                            self._cleanup_active = False
 
     def _remove_callback(self, weak_method: 'WeakMethod[MethodType]') -> None:
-        self._callbacks.remove(weak_method)
+        with self._lock:
+            try:
+                self._callbacks.remove(weak_method)
+            except ValueError:
+                # Shutdown already consumed this registry entry. The weak
+                # owner can disappear while its detached snapshot is running.
+                pass
 
     def on_shutdown(self, callback: Callable[[], None]) -> None:
         """Add a callback to be called on shutdown."""
         if not callable(callback):
             raise TypeError('callback should be a callable, got {}', type(callback))
 
-        if self.__context is None:
-            with self._lock:
+        call_now = False
+        with self._lock:
+            context = self.__context
+            if context is None:
                 if ismethod(callback):
                     self._callbacks.append(WeakMethod(callback, self._remove_callback))
                 else:
                     self._callbacks.append(callback)
-            return
-
-        with self.__context, self._lock:
-            if not self.__context.ok():
-                callback()
             else:
-                if ismethod(callback):
-                    self._callbacks.append(WeakMethod(callback, self._remove_callback))
-                else:
-                    self._callbacks.append(callback)
+                with context:
+                    if not context.ok():
+                        call_now = True
+                    elif ismethod(callback):
+                        self._callbacks.append(WeakMethod(callback, self._remove_callback))
+                    else:
+                        self._callbacks.append(callback)
+        if call_now:
+            callback()
 
     def _logging_fini(self) -> None:
         # This function must be called with self._lock held.
