@@ -219,6 +219,28 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_python_identity_map COMMAND test_python_identity_map)
     set_tests_properties(test_python_identity_map PROPERTIES TIMEOUT 60)
+
+    add_executable(test_timer_reset_threading
+      test/test_timer_reset_threading.cpp
+      src/rclpy/clock.cpp
+      src/rclpy/context.cpp
+      src/rclpy/destroyable.cpp
+      src/rclpy/time_point.cpp
+      src/rclpy/timer.cpp
+      src/rclpy/utils.cpp
+      src/rclpy/exceptions.cpp)
+    target_include_directories(test_timer_reset_threading PRIVATE src/rclpy)
+    target_link_libraries(test_timer_reset_threading PRIVATE
+      pybind11::embed Threads::Threads rcl::rcl rcl_action::rcl_action rcpputils::rcpputils)
+    set_target_properties(test_timer_reset_threading PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_timer_reset_threading PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_timer_reset_threading COMMAND test_timer_reset_threading)
+    set_tests_properties(test_timer_reset_threading PROPERTIES TIMEOUT 60)
   endif()
 
   if(NOT _typesupport_impls STREQUAL "")

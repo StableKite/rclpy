@@ -129,7 +129,14 @@ rcl_timer_t * Timer::rcl_ptr() const
 void Timer::reset_timer()
 {
   auto timer = rcl_handle();
-  rcl_ret_t ret = rcl_timer_reset(timer.get());
+  rcl_ret_t ret;
+  {
+    // The native callback replacement transaction can wait for an in-flight
+    // callback. Keep the timer lease, but detach so a concurrent Python GC
+    // can stop this caller while the SDK mutex is held by another thread.
+    py::gil_scoped_release release;
+    ret = rcl_timer_reset(timer.get());
+  }
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to reset timer");
   }
