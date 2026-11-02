@@ -20,6 +20,7 @@
 #include <rcl/time.h>
 
 #include <memory>
+#include <functional>
 
 #include "destroyable.hpp"
 #include "exceptions.hpp"
@@ -29,6 +30,25 @@ namespace py = pybind11;
 namespace rclpy
 {
 class ClockState;
+class NativeClockCallbackState;
+
+/// A native jump registration sharing the binding clock's mutation/lifetime guard.
+class ClockJumpCallback
+{
+public:
+  ~ClockJumpCallback() noexcept;
+  ClockJumpCallback(const ClockJumpCallback &) = delete;
+  ClockJumpCallback & operator=(const ClockJumpCallback &) = delete;
+
+private:
+  friend class Clock;
+  ClockJumpCallback(
+    std::shared_ptr<ClockState> state, rcl_jump_threshold_t threshold,
+    std::function<void(const rcl_time_jump_t *)> callback);
+
+  std::shared_ptr<ClockState> state_;
+  std::shared_ptr<NativeClockCallbackState> callback_;
+};
 
 /// Own a native clock while serializing mutations that invoke Python callbacks.
 class ClockMutation
@@ -138,6 +158,13 @@ public:
 
   /// Timer initialization/finalization also mutate this clock's callback array.
   ClockMutation mutation() const;
+
+  /// Register against a binding-owned clock, deferring SDK array changes during a jump.
+  /// An unknown native clock returns no registration; its native caller retains
+  /// the SDK's existing clock lifetime and serialization responsibilities.
+  static std::unique_ptr<ClockJumpCallback> create_native_jump_callback(
+    rcl_clock_t * clock, rcl_jump_threshold_t threshold,
+    std::function<void(const rcl_time_jump_t *)> callback);
 
   /// Force an early destruction of this object
   void destroy() override;

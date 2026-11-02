@@ -25,6 +25,7 @@
 #include <utility>
 
 #include "events_executor/delayed_event_thread.hpp"
+#include "clock.hpp"
 #include "timer.hpp"
 
 namespace pl = std::placeholders;
@@ -81,9 +82,24 @@ extern "C" void RclTimerResetTrampoline(const void * user_data, size_t)
 /// queue.
 class RclTimersManager::ClockManager : public std::enable_shared_from_this<ClockManager>
 {
+  struct TimerEntry
+  {
+    explicit TimerEntry(std::function<void()> callback) : ready_callback(std::move(callback)) {}
+    std::function<void()> ready_callback;
+  };
+
 public:
+  static std::shared_ptr<ClockManager> Create(EventsQueue * events_queue, rcl_clock_t * clock)
+  {
+    auto manager = std::make_shared<ClockManager>(events_queue, clock);
+    manager->Initialize();
+    return manager;
+  }
+
   ClockManager(EventsQueue * events_queue, rcl_clock_t * clock)
-  : events_queue_(events_queue), clock_(clock)
+  : events_queue_(events_queue), clock_(clock) {}
+
+  void Initialize()
   {
     // Need to establish a clock jump callback so we can tell when debug time is updated.
     rcl_jump_threshold_t threshold;
@@ -91,7 +107,9 @@ public:
     threshold.min_forward.nanoseconds = 1;
     threshold.min_backward.nanoseconds = -1;
     // Note, this callback could happen on any thread
-    jump_cb_ = [this](const rcl_time_jump_t * time_jump) {
+    std::weak_ptr<ClockManager> weak_this(shared_from_this());
+    auto queue = events_queue_;
+    jump_cb_ = [weak_this, queue](const rcl_time_jump_t * time_jump) {
         bool on_debug{};
         switch (time_jump->clock_change) {
           case RCL_ROS_TIME_NO_CHANGE:
@@ -103,19 +121,36 @@ public:
             on_debug = false;
             break;
         }
-        events_queue_->Enqueue(CallIfAlive(&ClockManager::HandleJump, on_debug));
+        queue->Enqueue([weak_this, on_debug]() {
+            if (auto manager = weak_this.lock()) {
+              manager->HandleJump(on_debug);
+            }
+          });
       };
-    if (
-      RCL_RET_OK !=
-      rcl_clock_add_jump_callback(clock_, threshold, RclClockJumpTrampoline, &jump_cb_))
-    {
-      throw std::runtime_error(
-        std::string("Failed to set RCL clock jump callback: ") + rcl_get_error_string().str);
+    native_jump_callback_ = Clock::create_native_jump_callback(clock_, threshold, jump_cb_);
+    if (!native_jump_callback_) {
+      // A caller-supplied native SDK clock retains the SDK's documented
+      // lifetime/serialization contract. Binding-owned clocks use the guard
+      // and deferred traversal-safe registration above.
+      if (
+        RCL_RET_OK !=
+        rcl_clock_add_jump_callback(clock_, threshold, RclClockJumpTrampoline, &jump_cb_))
+      {
+        throw std::runtime_error(
+          std::string("Failed to set RCL clock jump callback: ") + rcl_get_error_string().str);
+      }
+      raw_jump_registered_ = true;
     }
 
     // This isn't necessary yet but every timer will eventually depend on it.  Again, this could
     // happen on any thread.
-    reset_cb_ = [this]() {events_queue_->Enqueue(CallIfAlive(&ClockManager::UpdateTimers));};
+    reset_cb_ = [weak_this, queue]() {
+        queue->Enqueue([weak_this]() {
+            if (auto manager = weak_this.lock()) {
+              manager->UpdateTimers();
+            }
+          });
+      };
 
     // Initialize which timebase we're on
     if (clock_->type == RCL_ROS_TIME) {
@@ -128,7 +163,10 @@ public:
 
   ~ClockManager()
   {
-    if (RCL_RET_OK != rcl_clock_remove_jump_callback(clock_, RclClockJumpTrampoline, &jump_cb_)) {
+    native_jump_callback_.reset();
+    if (raw_jump_registered_ &&
+      RCL_RET_OK != rcl_clock_remove_jump_callback(clock_, RclClockJumpTrampoline, &jump_cb_))
+    {
       py::gil_scoped_acquire gil_acquire;
       py::print(
         std::string("Failed to remove RCL clock jump callback: ") + rcl_get_error_string().str);
@@ -143,19 +181,38 @@ public:
   void AddTimer(
     rcl_timer_t * timer, std::function<void()> ready_callback)
   {
+    // Allocate the entry/map slot before exposing our reset callback to RCL.
+    auto entry = std::make_shared<TimerEntry>(std::move(ready_callback));
+    auto insertion = timers_.try_emplace(timer, entry);
     // All timers have the same reset callback
     if (
       RCL_RET_OK != rcl_timer_set_on_reset_callback(timer, RclTimerResetTrampoline, &reset_cb_))
     {
+      if (insertion.second) {
+        timers_.erase(insertion.first);
+      }
       throw std::runtime_error(
         std::string("Failed to set timer reset callback: ") + rcl_get_error_string().str);
     }
-    timers_[timer] = ready_callback;
+    if (!insertion.second) {
+      ready_timers_.erase(insertion.first->second);
+      insertion.first->second = std::move(entry);
+    }
     if (timers_.size() >= WARN_TIMERS_COUNT) {
+      py::gil_scoped_acquire attached;
       py::print("Warning, the number of timers associated with this clock is large.");
       py::print("Management of this number of timers may be inefficient.");
     }
-    UpdateTimers();
+    try {
+      UpdateTimers();
+    } catch (...) {
+      // A fresh failed registration must not leave a callback pointing into
+      // a manager after its caller releases the native timer's owner lease.
+      if (insertion.second) {
+        RemoveTimer(timer);
+      }
+      throw;
+    }
   }
 
   void RemoveTimer(rcl_timer_t * timer)
@@ -169,6 +226,7 @@ public:
       throw std::runtime_error(
         std::string("Failed to clear timer reset callback: ") + rcl_get_error_string().str);
     }
+    ready_timers_.erase(it->second);
     timers_.erase(it);
     // We could re-evaluate how long we need to block for now that a timer has been removed; but,
     // there's no real harm in one extra wakeup that then decides it doesn't need to do anything,
@@ -214,8 +272,16 @@ private:
       auto this_next_time_ns = GetNextCallTimeNanoseconds(timer_cb_pair.first);
       if (this_next_time_ns) {
         if (*this_next_time_ns <= rcl_now) {
-          ready_timers_.insert(timer_cb_pair.first);
-          events_queue_->Enqueue(CallIfAlive(&ClockManager::DispatchTimer, timer_cb_pair.first));
+          auto entry = timer_cb_pair.second;
+          if (ready_timers_.insert(entry).second) {
+            try {
+              events_queue_->Enqueue(
+                CallIfAlive(&ClockManager::DispatchTimer, timer_cb_pair.first, entry));
+            } catch (...) {
+              ready_timers_.erase(entry);
+              throw;
+            }
+          }
         } else if (!next_ready_time_ns || (*this_next_time_ns < *next_ready_time_ns)) {
           next_ready_time_ns = this_next_time_ns;
         }
@@ -235,18 +301,19 @@ private:
     }
   }
 
-  void DispatchTimer(rcl_timer_t * rcl_timer)
+  void DispatchTimer(rcl_timer_t * rcl_timer, std::shared_ptr<TimerEntry> entry)
   {
-    ready_timers_.erase(rcl_timer);
+    const bool was_ready = ready_timers_.erase(entry) != 0;
     // If we've dispatched all ready timers, then trigger another update to see when the next
     // timers will be ready.
-    if (ready_timers_.empty()) {
+    if (was_ready && ready_timers_.empty()) {
       events_queue_->Enqueue(CallIfAlive(&ClockManager::UpdateTimers));
     }
 
     const auto map_it = timers_.find(rcl_timer);
-    if (map_it == timers_.end()) {
-      // Perhaps the timer was removed before a pending callback could be dispatched?
+    if (map_it == timers_.end() || map_it->second != entry) {
+      // The address may now belong to a new timer/registration. Only the exact
+      // generation that was queued may use that SDK pointer and callback.
       return;
     }
 
@@ -257,7 +324,7 @@ private:
     switch (ret) {
       case RCL_RET_OK:
         // Dispatch the actual user callback.
-        map_it->second();
+        entry->ready_callback();
         break;
       case RCL_RET_TIMER_CANCELED:
         // Someone canceled the timer after we queried the call time.  Nevermind, then...
@@ -289,11 +356,13 @@ private:
   EventsQueue * const events_queue_;
   rcl_clock_t * const clock_;
   ClockJumpCallbackT jump_cb_;
+  std::unique_ptr<ClockJumpCallback> native_jump_callback_;
+  bool raw_jump_registered_ = false;
   TimerResetCallbackT reset_cb_;
   bool on_debug_time_{};
 
-  std::unordered_map<rcl_timer_t *, std::function<void()>> timers_;
-  std::unordered_set<rcl_timer_t *> ready_timers_;
+  std::unordered_map<rcl_timer_t *, std::shared_ptr<TimerEntry>> timers_;
+  std::unordered_set<std::shared_ptr<TimerEntry>> ready_timers_;
   DelayedEventThread next_update_wait_{events_queue_};
 };
 
@@ -324,9 +393,16 @@ void RclTimersManager::AddTimer(
   auto it = clock_managers_.find(clock);
   if (it == clock_managers_.end()) {
     std::tie(it, std::ignore) = clock_managers_.insert(
-      std::make_pair(clock, std::make_shared<ClockManager>(events_queue_, clock)));
+      std::make_pair(clock, ClockManager::Create(events_queue_, clock)));
   }
-  it->second->AddTimer(timer, ready_callback);
+  try {
+    it->second->AddTimer(timer, ready_callback);
+  } catch (...) {
+    if (it->second->empty()) {
+      clock_managers_.erase(it);
+    }
+    throw;
+  }
 }
 
 void RclTimersManager::RemoveTimer(rcl_timer_t * timer)

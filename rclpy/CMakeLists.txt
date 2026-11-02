@@ -265,6 +265,31 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_events_callback_threading COMMAND test_events_callback_threading)
     set_tests_properties(test_events_callback_threading PROPERTIES TIMEOUT 60)
+
+    add_executable(test_events_clock_threading
+      test/test_events_clock_threading.cpp
+      src/rclpy/clock.cpp
+      src/rclpy/context.cpp
+      src/rclpy/destroyable.cpp
+      src/rclpy/time_point.cpp
+      src/rclpy/timer.cpp
+      src/rclpy/utils.cpp
+      src/rclpy/exceptions.cpp
+      src/rclpy/events_executor/events_queue.cpp
+      src/rclpy/events_executor/timers_manager.cpp
+      src/rclpy/events_executor/delayed_event_thread.cpp)
+    target_include_directories(test_events_clock_threading PRIVATE src/rclpy)
+    target_link_libraries(test_events_clock_threading PRIVATE
+      pybind11::embed Threads::Threads rcl::rcl rcl_action::rcl_action rcpputils::rcpputils)
+    set_target_properties(test_events_clock_threading PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_events_clock_threading PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_events_clock_threading COMMAND test_events_clock_threading)
+    set_tests_properties(test_events_clock_threading PROPERTIES TIMEOUT 60)
   endif()
 
   if(NOT _typesupport_impls STREQUAL "")

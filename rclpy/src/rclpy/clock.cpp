@@ -24,7 +24,9 @@
 #include <cstdio>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,6 +38,20 @@ namespace rclpy
 {
 namespace
 {
+struct ClockRegistry
+{
+  std::mutex mutex;
+  std::unordered_map<rcl_clock_t *, std::weak_ptr<ClockState>> clocks;
+};
+
+std::shared_ptr<ClockRegistry> clock_registry()
+{
+  // Each ClockState also retains the registry, so its cleanup does not depend
+  // on the order in which extension-module statics are finalized.
+  static auto registry = std::make_shared<ClockRegistry>();
+  return registry;
+}
+
 bool thread_attached()
 {
 #if PY_VERSION_HEX >= 0x030D0000
@@ -55,6 +71,7 @@ bool python_finalizing()
 }
 
 void on_time_jump(const rcl_time_jump_t *, bool, void *) noexcept;
+void on_native_time_jump(const rcl_time_jump_t *, bool, void *) noexcept;
 
 struct ClockCallback
 {
@@ -64,14 +81,26 @@ struct ClockCallback
   std::weak_ptr<ClockState> state;
   py::weakref owner;
   bool enabled = true;
+  bool registered = false;
+  rcl_jump_threshold_t threshold{};
 };
 }  // namespace
+
+class NativeClockCallbackState
+{
+public:
+  std::weak_ptr<ClockState> state;
+  std::function<void(const rcl_time_jump_t *)> callback;
+  rcl_jump_threshold_t threshold{};
+  std::atomic<bool> enabled{true};
+  bool registered = false;
+};
 
 class ClockState
 {
 public:
   explicit ClockState(int clock_type)
-  : lock(py::module_::import("threading").attr("RLock")()),
+  : registry(clock_registry()), lock(py::module_::import("threading").attr("RLock")()),
     acquire(lock.attr("acquire")), release(lock.attr("release"))
   {
     auto allocator = rcl_get_default_allocator();
@@ -83,6 +112,10 @@ public:
 
   ~ClockState()
   {
+    {
+      std::lock_guard<std::mutex> guard(registry->mutex);
+      registry->clocks.erase(&clock);
+    }
     // A worker can release the last native lease. Attach before DECREF, but
     // never attach a foreign thread to an interpreter that is shutting down.
     const bool attached = thread_attached();
@@ -100,6 +133,7 @@ public:
       (void)release.release();
     }
     callbacks.clear();
+    native_callbacks.clear();
     lock = py::object();
     acquire = py::object();
     release = py::object();
@@ -129,7 +163,19 @@ public:
     for (auto it = callbacks.begin(); it != callbacks.end(); ) {
       auto & callback = *it;
       if (callback->enabled && !callback->owner().is_none()) {
+        if (!callback->registered) {
+          if (RCL_RET_OK != rcl_clock_add_jump_callback(
+              &clock, callback->threshold, on_time_jump, callback.get()))
+          {
+            throw RCLError("failed to add time jump callback");
+          }
+          callback->registered = true;
+        }
         ++it;
+        continue;
+      }
+      if (!callback->registered) {
+        it = callbacks.erase(it);
         continue;
       }
       auto ret = rcl_clock_remove_jump_callback(&clock, on_time_jump, callback.get());
@@ -154,16 +200,116 @@ public:
     }
   }
 
+  // Like Python JumpHandles, native registrations must not reallocate or move
+  // the SDK's callback array while that SDK array is being traversed.
+  void prune_native_callbacks()
+  {
+    for (auto it = native_callbacks.begin(); it != native_callbacks.end(); ) {
+      auto & callback = *it;
+      if (callback->enabled) {
+        if (!callback->registered) {
+          if (RCL_RET_OK != rcl_clock_add_jump_callback(
+              &clock, callback->threshold, on_native_time_jump, callback.get()))
+          {
+            throw RCLError("failed to add native time jump callback");
+          }
+          callback->registered = true;
+        }
+        ++it;
+        continue;
+      }
+      if (!callback->registered) {
+        it = native_callbacks.erase(it);
+        continue;
+      }
+      const auto ret = rcl_clock_remove_jump_callback(&clock, on_native_time_jump, callback.get());
+      bool still_registered = false;
+      for (size_t index = 0; index < clock.num_jump_callbacks; ++index) {
+        const auto & entry = clock.jump_callbacks[index];
+        if (entry.callback == on_native_time_jump && entry.user_data == callback.get()) {
+          still_registered = true;
+          break;
+        }
+      }
+      if (still_registered) {
+        ++it;
+      } else {
+        callback->registered = false;
+        it = native_callbacks.erase(it);
+      }
+      if (ret != RCL_RET_OK) {
+        throw RCLError("failed to remove native time jump callback");
+      }
+    }
+  }
+
   rcl_clock_t clock{};
   bool initialized = false;
+  std::shared_ptr<ClockRegistry> registry;
   py::object lock;
   py::object acquire;
   py::object release;
   std::vector<std::shared_ptr<ClockCallback>> callbacks;
+  std::vector<std::shared_ptr<NativeClockCallbackState>> native_callbacks;
   std::vector<std::weak_ptr<void>> timers;
   std::vector<std::shared_ptr<void>> active_timers;
   size_t update_depth = 0;
 };
+
+ClockJumpCallback::ClockJumpCallback(
+  std::shared_ptr<ClockState> state, rcl_jump_threshold_t threshold,
+  std::function<void(const rcl_time_jump_t *)> callback)
+: state_(std::move(state)), callback_(std::make_shared<NativeClockCallbackState>())
+{
+  ClockMutation guard(state_);
+  callback_->state = state_;
+  callback_->threshold = threshold;
+  callback_->callback = std::move(callback);
+  state_->native_callbacks.push_back(callback_);
+  if (state_->update_depth == 0) {
+    try {
+      state_->prune_native_callbacks();
+    } catch (...) {
+      const auto failure = std::current_exception();
+      callback_->enabled = false;
+      try {
+        state_->prune_native_callbacks();
+      } catch (const std::exception & error) {
+        PyErr_SetString(PyExc_RuntimeError, error.what());
+        PyErr_WriteUnraisable(Py_None);
+      }
+      std::rethrow_exception(failure);
+    }
+  }
+}
+
+ClockJumpCallback::~ClockJumpCallback() noexcept
+{
+  // Cancel before waiting for the guard, including a finalization-time worker
+  // which cannot attach. The guard then drains any callback already running.
+  callback_->enabled.store(false);
+  if (!thread_attached() && (!Py_IsInitialized() || python_finalizing())) {
+    // No Python thread may reattach during shutdown. Keep disabled SDK userdata
+    // owned by ClockState until the native clock itself is finalized.
+    return;
+  }
+  try {
+    ClockMutation guard(state_, true);
+    py::error_scope preserve;
+    callback_->enabled = false;
+    if (state_->update_depth == 0) {
+      state_->prune_native_callbacks();
+    }
+  } catch (py::error_already_set & error) {
+    py::gil_scoped_acquire attached;
+    error.discard_as_unraisable("removing a native clock jump callback");
+  } catch (const std::exception & error) {
+    py::gil_scoped_acquire attached;
+    py::error_scope preserve;
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+    PyErr_WriteUnraisable(Py_None);
+  }
+}
 
 ClockMutation::ClockMutation(std::shared_ptr<ClockState> state, bool cleanup)
 : state_(std::move(state))
@@ -234,6 +380,7 @@ public:
   {
     if (state_.update_depth == 0) {
       state_.prune_callbacks();
+      state_.prune_native_callbacks();
       std::vector<std::shared_ptr<void>> owners;
       for (const auto & weak : state_.timers) {
         if (auto owner = weak.lock()) {
@@ -265,6 +412,7 @@ public:
       std::vector<std::shared_ptr<void>> owners;
       owners.swap(state_.active_timers);
       state_.prune_callbacks();
+      state_.prune_native_callbacks();
       // Release timers only after callback iteration and pruning have ended.
     }
   }
@@ -347,10 +495,48 @@ void on_time_jump(const rcl_time_jump_t * time_jump, bool before_jump, void * us
     PyErr_WriteUnraisable(Py_None);
   }
 }
+
+void on_native_time_jump(
+  const rcl_time_jump_t * time_jump, bool before_jump, void * user_data) noexcept
+{
+  if (before_jump) {
+    return;
+  }
+  auto & callback = *static_cast<NativeClockCallbackState *>(user_data);
+  if (!callback.enabled.load()) {
+    return;
+  }
+  const bool already_attached = thread_attached();
+  py::gil_scoped_acquire attached;
+  if (PyErr_Occurred()) {
+    return;
+  }
+  try {
+    if (auto state = callback.state.lock()) {
+      ClockMutation guard(std::move(state));
+      if (callback.enabled && !PyErr_Occurred()) {
+        callback.callback(time_jump);
+      }
+    }
+  } catch (py::error_already_set & error) {
+    error.restore();
+  } catch (const std::exception & error) {
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+  } catch (...) {
+    PyErr_SetString(PyExc_RuntimeError, "unknown exception in native clock jump callback");
+  }
+  if (!already_attached && PyErr_Occurred()) {
+    PyErr_WriteUnraisable(Py_None);
+  }
+}
 }  // namespace
 
 Clock::Clock(int clock_type)
-: state_(std::make_shared<ClockState>(clock_type)) {}
+: state_(std::make_shared<ClockState>(clock_type))
+{
+  std::lock_guard<std::mutex> guard(state_->registry->mutex);
+  state_->registry->clocks[&state_->clock] = state_;
+}
 
 Clock::Clock(const Clock & other)
 : Destroyable(other), std::enable_shared_from_this<Clock>(),
@@ -378,6 +564,26 @@ rcl_clock_t * Clock::rcl_ptr() const
 ClockMutation Clock::mutation() const
 {
   return ClockMutation(std::atomic_load(&state_));
+}
+
+std::unique_ptr<ClockJumpCallback> Clock::create_native_jump_callback(
+  rcl_clock_t * clock, rcl_jump_threshold_t threshold,
+  std::function<void(const rcl_time_jump_t *)> callback)
+{
+  std::shared_ptr<ClockState> state;
+  auto registry = clock_registry();
+  {
+    std::lock_guard<std::mutex> guard(registry->mutex);
+    auto it = registry->clocks.find(clock);
+    if (it != registry->clocks.end()) {
+      state = it->second.lock();
+    }
+  }
+  if (!state) {
+    return {};
+  }
+  return std::unique_ptr<ClockJumpCallback>(
+    new ClockJumpCallback(std::move(state), threshold, std::move(callback)));
 }
 
 rcl_time_point_t Clock::get_now()
@@ -441,12 +647,17 @@ void Clock::add_clock_callback(
   threshold.on_clock_change = on_clock_change;
   threshold.min_forward.nanoseconds = min_forward;
   threshold.min_backward.nanoseconds = min_backward;
-
-  rcl_ret_t ret = rcl_clock_add_jump_callback(
-    guard.rcl_ptr(), threshold, on_time_jump, callback.get());
-  if (ret != RCL_RET_OK) {
-    state->callbacks.pop_back();
-    throw RCLError("failed to add time jump callback");
+  callback->threshold = threshold;
+  if (state->update_depth == 0) {
+    // A callback added reentrantly is established only after the current SDK
+    // traversal. In particular, it cannot unexpectedly join its post phase.
+    const auto ret = rcl_clock_add_jump_callback(
+      guard.rcl_ptr(), threshold, on_time_jump, callback.get());
+    if (ret != RCL_RET_OK) {
+      state->callbacks.pop_back();
+      throw RCLError("failed to add time jump callback");
+    }
+    callback->registered = true;
   }
 }
 
