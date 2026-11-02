@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import rclpy.context as context_module
+from rclpy import utilities
 from rclpy.context import Context
 
 
@@ -149,4 +150,54 @@ def test_concurrent_callback_registration_cleanup_and_collection():
         assert context_module.g_logging_ref_count == before
     finally:
         context.try_shutdown()
+        context.destroy()
+
+
+def test_expired_callback_pruning_does_not_compare_callable_objects():
+    context = Context()
+    context.init(args=[], domain_id=219, initialize_logging=False)
+    seen = []
+    comparisons = []
+
+    class CallableOwner:
+        def __call__(self):
+            seen.append('strong')
+            return lambda: seen.append('unexpected return-value invocation')
+
+        def __eq__(self, other):
+            comparisons.append(other)
+            context.ok()
+            return False
+
+    class WeakOwner:
+        def callback(self):
+            seen.append('expired')
+
+    callback = CallableOwner()
+    context.on_shutdown(callback)
+    context.on_shutdown(callback)
+    owner = WeakOwner()
+    context.on_shutdown(owner.callback)
+    try:
+        del owner
+        gc.collect()
+        context.shutdown()
+        assert seen == ['strong', 'strong']
+        assert comparisons == []
+    finally:
+        context.try_shutdown()
+        context.destroy()
+
+
+def test_default_context_shutdown_callback_can_query_default_context():
+    context = utilities.get_default_context()
+    context.init(args=[], domain_id=219, initialize_logging=False)
+    seen = []
+    context.on_shutdown(lambda: seen.append(utilities.ok()))
+    try:
+        utilities.try_shutdown()
+        assert seen == [False]
+        assert utilities.get_default_context() is not context
+    finally:
+        utilities.try_shutdown()
         context.destroy()

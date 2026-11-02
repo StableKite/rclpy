@@ -18,6 +18,7 @@ import threading
 from types import MethodType, TracebackType
 from typing import Callable
 from typing import ContextManager
+from typing import Dict
 from typing import List
 from typing import Optional
 from typing import Protocol
@@ -26,6 +27,18 @@ from typing import Union
 from weakref import WeakMethod
 
 from rclpy.destroyable import DestroyableType
+
+_ShutdownCallback = Callable[[], object]
+
+
+class _StrongCallback:
+    __slots__ = ('callback',)
+
+    def __init__(self, callback: _ShutdownCallback) -> None:
+        self.callback = callback
+
+
+_CallbackReference = Union['WeakMethod[MethodType]', _StrongCallback]
 
 
 class ContextHandle(DestroyableType, Protocol):
@@ -60,12 +73,13 @@ class Context(ContextManager['Context']):
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # Weak-reference hooks can re-enter this thread during collection.
+        self._lock = threading.RLock()
         # Serialize complete shutdown transactions while letting callbacks use
         # the context state lock (including from another thread).
         self._shutdown_lock = threading.RLock()
         self._cleanup_active = False
-        self._callbacks: List[Union['WeakMethod[MethodType]', Callable[[], None]]] = []
+        self._callbacks: Dict[object, _CallbackReference] = {}
         self._logging_initialized = False
         self.__context: Optional[ContextHandle] = None
 
@@ -122,11 +136,12 @@ class Context(ContextManager['Context']):
                 return self.__context.ok()
 
     def _call_on_shutdown_callbacks(self) -> None:
+        replacement: Dict[object, _CallbackReference] = {}
         with self._lock:
             callbacks = self._callbacks
-            self._callbacks = []
-        for weak_method in callbacks:
-            callback = weak_method()
+            self._callbacks = replacement
+        for entry in callbacks.values():
+            callback = entry.callback if isinstance(entry, _StrongCallback) else entry()
             if callback is not None:
                 callback()
 
@@ -167,34 +182,38 @@ class Context(ContextManager['Context']):
 
     def _remove_callback(self, weak_method: 'WeakMethod[MethodType]') -> None:
         with self._lock:
-            try:
-                self._callbacks.remove(weak_method)
-            except ValueError:
-                # Shutdown already consumed this registry entry. The weak
-                # owner can disappear while its detached snapshot is running.
-                pass
+            # Never compare user callables while pruning a weak owner. The
+            # detached shutdown snapshot may already have consumed this key.
+            self._callbacks.pop(id(weak_method), None)
 
-    def on_shutdown(self, callback: Callable[[], None]) -> None:
-        """Add a callback to be called on shutdown."""
+    def on_shutdown(self, callback: _ShutdownCallback) -> None:
+        """Add a callback to be called on shutdown; its return value is ignored."""
         if not callable(callback):
             raise TypeError('callback should be a callable, got {}', type(callback))
 
+        # Allocate weak references outside the state lock: their construction
+        # can trigger collection. Opaque keys never hash/compare user callables
+        # and retain duplicate registrations in insertion order.
+        key: object
+        entry: _CallbackReference
+        if ismethod(callback):
+            weak_method = WeakMethod(callback, self._remove_callback)
+            key = id(weak_method)
+            entry = weak_method
+        else:
+            entry = _StrongCallback(callback)
+            key = entry
         call_now = False
         with self._lock:
             context = self.__context
             if context is None:
-                if ismethod(callback):
-                    self._callbacks.append(WeakMethod(callback, self._remove_callback))
-                else:
-                    self._callbacks.append(callback)
+                self._callbacks[key] = entry
             else:
                 with context:
                     if not context.ok():
                         call_now = True
-                    elif ismethod(callback):
-                        self._callbacks.append(WeakMethod(callback, self._remove_callback))
                     else:
-                        self._callbacks.append(callback)
+                        self._callbacks[key] = entry
         if call_now:
             callback()
 

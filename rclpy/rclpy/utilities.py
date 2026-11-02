@@ -25,22 +25,29 @@ import ament_index_python
 from rclpy.constants import S_TO_NS
 from rclpy.context import Context
 
-g_default_context = None
+g_default_context: Optional[Context] = None
 g_context_lock = threading.Lock()
 
 
-def get_default_context(*, shutting_down=False) -> Context:
+def get_default_context(*, shutting_down: bool = False) -> Context:
     """Return the global default context singleton."""
-    global g_context_lock
+    global g_default_context
     with g_context_lock:
-        global g_default_context
+        context = g_default_context
+        if context is not None:
+            if shutting_down:
+                g_default_context = None
+            return context
+    # Construction can allocate Python objects and run collection hooks. Keep
+    # it outside the singleton lock, then publish only if still needed.
+    candidate = Context()
+    with g_context_lock:
         if g_default_context is None:
-            g_default_context = Context()
+            g_default_context = candidate
+        context = g_default_context
         if shutting_down:
-            old_context = g_default_context
             g_default_context = None
-            return old_context
-        return g_default_context
+        return context
 
 
 def remove_ros_args(args: Optional[Sequence[str]] = None) -> List[str]:
@@ -70,7 +77,7 @@ def ok(*, context: Optional[Context] = None) -> bool:
     return context.ok()
 
 
-def shutdown(*, context=None) -> None:
+def shutdown(*, context: Optional[Context] = None) -> None:
     """
     Shutdown the given ``Context``.
 
@@ -82,24 +89,23 @@ def shutdown(*, context=None) -> None:
     context.shutdown()
 
 
-def try_shutdown(*, context=None) -> None:
+def try_shutdown(*, context: Optional[Context] = None) -> None:
     """
     Shutdown the given ``Context`` if not already shutdown.
 
     :param context: a ``Context`` to check, else the global default context is
         used.
     """
-    global g_context_lock
     global g_default_context
     if context is None:
         # Replace the default context with a new one if shutdown was successful
         # or if the context was already shutdown.
-        with g_context_lock:
-            if g_default_context is None:
-                g_default_context = Context()
-            g_default_context.try_shutdown()
-            if not g_default_context.ok():
-                g_default_context = None
+        context = get_default_context()
+        context.try_shutdown()
+        if not context.ok():
+            with g_context_lock:
+                if g_default_context is context:
+                    g_default_context = None
     else:
         context.try_shutdown()
 
