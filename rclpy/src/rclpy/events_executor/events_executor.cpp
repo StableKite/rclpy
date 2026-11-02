@@ -32,10 +32,12 @@
 #include <rcl/error_handling.h>
 
 #include <chrono>
+#include <cstdint>
 #include <utility>
 
 #include "client.hpp"
 #include "context.hpp"
+#include "events_executor/queued_task_ref.hpp"
 #include "service.hpp"
 #include "subscription.hpp"
 
@@ -68,19 +70,59 @@ pybind11::object EventsExecutor::create_task(
   // Create and return a rclpy.task.Task() object, and schedule it to be called later.
   using py::literals::operator""_a;
   py::object task = rclpy_task_(callback, args, kwargs, "executor"_a = py::cast(this));
-  // The Task needs to be owned at least until we invoke it from the callback we post, however we
-  // can't pass a bare py::object because that's going to try to do Python refcounting while
-  // preparing to go into or coming back from the callback, while the GIL is not held.  We'll do
-  // manual refcounting on it instead.
-  py::handle cb_task_handle = task;
-  cb_task_handle.inc_ref();
   call_task_in_next_spin(task);
   return task;
 }
 
 void EventsExecutor::call_task_in_next_spin(pybind11::handle task)
 {
-  events_queue_.Enqueue(std::bind(&EventsExecutor::IterateTask, this, task));
+  auto queued = std::make_shared<QueuedTaskRef>(task);
+  py::dict owners = TaskOwners();
+  py::int_ key(reinterpret_cast<std::uintptr_t>(task.ptr()));
+  py::object retired;
+  {
+    // Primitive identity keys avoid user hash/equality code. All final Python
+    // owner releases happen after this native registry lock has been released.
+    std::lock_guard<std::mutex> lock(task_owners_mutex_);
+    const bool registered = owners.contains(key);
+    owners[key] = task;
+    try {
+      events_queue_.Enqueue([this, queued]() {
+        py::gil_scoped_acquire attached;
+        py::object owner = queued->lock();
+        IterateTask(owner);
+      });
+    } catch (...) {
+      if (!registered) {
+        retired = owners.attr("pop")(key, py::none());
+      }
+      throw;
+    }
+  }
+  // Cancellation can win before registration obtains the registry lock. Check
+  // terminal state outside that lock; a later completion also notifies us.
+  if (py::cast<bool>(task.attr("done")()) || py::cast<bool>(task.attr("cancelled")())) {
+    on_task_done(task);
+  }
+}
+
+py::dict EventsExecutor::TaskOwners()
+{
+  // dynamic_attr gives CPython's cyclic GC visibility into the task -> callback
+  // -> executor cycle. No native queue closure keeps a strong task reference.
+  py::object attributes = py::cast(this).attr("__dict__");
+  return py::cast<py::dict>(attributes.attr("setdefault")("_rclpy_pending_tasks", py::dict()));
+}
+
+void EventsExecutor::on_task_done(py::handle task)
+{
+  py::dict owners = TaskOwners();
+  py::int_ key(reinterpret_cast<std::uintptr_t>(task.ptr()));
+  py::object retired;
+  {
+    std::lock_guard<std::mutex> lock(task_owners_mutex_);
+    retired = owners.attr("pop")(key, py::none());
+  }
 }
 
 pybind11::object EventsExecutor::create_future()
@@ -780,13 +822,14 @@ void EventsExecutor::IterateTask(py::handle task)
     events_queue_.Stop();
   }
   py::gil_scoped_acquire gil_acquire;
+  if (task.is_none()) {
+    // A completed or cancelled task may have retired before this queued wake.
+    return;
+  }
   // Calling this won't throw, but it may set the exception property on the task object.
   task();
   if (py::cast<bool>(task.attr("done")())) {
     py::object ex = task.attr("exception")();
-    // Drop reference with GIL held.  This doesn't necessarily destroy the underlying Task, since
-    // the `create_task()` caller may have retained a reference to the returned value.
-    task.dec_ref();
 
     if (!ex.is_none()) {
       // It's not clear how to easily turn a Python exception into a C++ one, so let's just throw
@@ -859,11 +902,12 @@ void EventsExecutor::Raise(py::object ex)
 
 void define_events_executor(py::object module)
 {
-  py::class_<EventsExecutor>(module, "EventsExecutor")
+  py::class_<EventsExecutor>(module, "EventsExecutor", py::dynamic_attr())
   .def(py::init<py::object>(), py::arg("context"))
   .def_property_readonly("context", &EventsExecutor::get_context)
   .def("create_task", &EventsExecutor::create_task, py::arg("callback"))
   .def("_call_task_in_next_spin", &EventsExecutor::call_task_in_next_spin, py::arg("task"))
+  .def("_on_task_done", &EventsExecutor::on_task_done, py::arg("task"))
   .def("create_future", &EventsExecutor::create_future)
   .def("shutdown", &EventsExecutor::shutdown, py::arg("timeout_sec") = py::none())
   .def("add_node", &EventsExecutor::add_node, py::arg("node"))

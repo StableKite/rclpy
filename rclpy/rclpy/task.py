@@ -326,6 +326,16 @@ class Task(Future):
         self._handler = None
         self._args = None
         self._kwargs = None
+        self._notify_executor_task_done()
+
+    def _notify_executor_task_done(self) -> None:
+        # A task awaiting a Future may finish inside that Future's resume
+        # callback, rather than through its executor's direct task dispatch.
+        executor = self._executor()
+        if executor is not None:
+            notify = getattr(executor, '_on_task_done', None)
+            if notify is not None:
+                notify(self)
 
     def executing(self):
         """
@@ -341,3 +351,5 @@ class Task(Future):
             self._handler.close()
 
         super().cancel()
+        if self.cancelled():
+            self._notify_executor_task_done()

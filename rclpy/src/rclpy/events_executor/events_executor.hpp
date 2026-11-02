@@ -67,6 +67,7 @@ public:
   pybind11::object create_task(
     pybind11::object callback, pybind11::args args = {}, const pybind11::kwargs & kwargs = {});
   void call_task_in_next_spin(pybind11::handle task);
+  void on_task_done(pybind11::handle task);
   pybind11::object create_future();
   bool shutdown(std::optional<double> timeout_sec = {});
   bool add_node(pybind11::object node);
@@ -145,8 +146,10 @@ private:
   void HandleWaitableReady(
     pybind11::handle waitable, std::shared_ptr<rclpy::WaitSet> wait_set, size_t number_of_events);
 
-  /// Helper for create_task().  @p task needs to have had one reference manually added to it.  See
-  /// create_task() implementation for details.
+  /// GC-visible task owners live on the Python instance, including callback cycles.
+  pybind11::dict TaskOwners();
+
+  /// Helper for create_task(); the caller retains an owner for this dispatch.
   void IterateTask(pybind11::handle task);
 
   void HandleCallbackExceptionInNodeEntity(
@@ -172,6 +175,7 @@ private:
   pybind11::set nodes_;                ///< The set of all nodes we're executing
   std::atomic<bool> wake_pending_{};   ///< An unhandled call to wake() has been made
   std::timed_mutex spinning_mutex_;    ///< Held while a thread is spinning
+  std::mutex task_owners_mutex_;       ///< Serializes identity-key registration and completion
 
   /// This flag is used by spin_once() to signal that the EventsQueue should be stopped after a
   /// single user-visible callback has been dispatched.

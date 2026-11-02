@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import gc
 import os
 import threading
 import time
@@ -20,6 +21,7 @@ from typing import Generator
 from typing import List
 import unittest
 import warnings
+import weakref
 
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -940,6 +942,111 @@ class TestExecutor(unittest.TestCase):
         finally:
             worker_a_should_exit.set()
             ta.join(timeout=2.0)
+
+    def test_pending_task_owners_are_collected(self) -> None:
+        for factory in (SingleThreadedExecutor, EventsExecutor):
+            with self.subTest(executor=factory):
+                executor = factory(context=self.context)
+                task = executor.create_task(lambda: None)
+                task_ref = weakref.ref(task)
+                executor_ref = weakref.ref(executor)
+                self.assertTrue(executor.shutdown(timeout_sec=5))
+                del task, executor
+                gc.collect()
+                self.assertIsNone(executor_ref())
+                self.assertIsNone(task_ref())
+
+    def test_pending_task_callback_cycle_is_collected(self) -> None:
+        for factory in (SingleThreadedExecutor, EventsExecutor):
+            with self.subTest(executor=factory):
+                executor = factory(context=self.context)
+                task = executor.create_task(lambda owner=executor: owner.is_spinning)
+                task_ref = weakref.ref(task)
+                executor_ref = weakref.ref(executor)
+                self.assertTrue(executor.shutdown(timeout_sec=5))
+                del task, executor
+                gc.collect()
+                self.assertIsNone(executor_ref())
+                self.assertIsNone(task_ref())
+
+    def test_awaited_task_retires_after_future_resume(self) -> None:
+        executor = EventsExecutor(context=self.context)
+        future = executor.create_future()
+        results = []
+
+        async def await_result():
+            value = await future
+            results.append(value)
+            return value
+
+        task = executor.create_task(await_result)
+        task_ref = weakref.ref(task)
+        try:
+            executor.spin_once(timeout_sec=5)
+            self.assertFalse(task.done())
+            del task
+            gc.collect()
+            self.assertIsNotNone(task_ref())
+            future.set_result(37)
+            executor.spin_once(timeout_sec=5)
+            self.assertEqual(results, [37])
+            completed = task_ref()
+            if completed is not None:
+                self.assertTrue(completed.done())
+                self.assertEqual(completed.result(), 37)
+            del completed
+            gc.collect()
+            self.assertIsNone(task_ref())
+        finally:
+            executor.shutdown(timeout_sec=5)
+
+    def test_yielding_task_owned_until_completion(self) -> None:
+        class YieldOnce:
+
+            def __await__(self) -> Generator[None, None, None]:
+                yield None
+
+        executor = EventsExecutor(context=self.context)
+        calls = []
+
+        async def yield_twice() -> int:
+            calls.append(1)
+            await YieldOnce()
+            calls.append(2)
+            await YieldOnce()
+            calls.append(3)
+            return 41
+
+        task = executor.create_task(yield_twice)
+        task_ref = weakref.ref(task)
+        del task
+        try:
+            for expected in ([1], [1, 2]):
+                gc.collect()
+                self.assertIsNotNone(task_ref())
+                executor.spin_once(timeout_sec=5)
+                self.assertEqual(calls, expected)
+            executor.spin_once(timeout_sec=5)
+            self.assertEqual(calls, [1, 2, 3])
+            gc.collect()
+            self.assertIsNone(task_ref())
+        finally:
+            executor.shutdown(timeout_sec=5)
+
+    def test_cancelled_queued_task_releases_owner(self) -> None:
+        executor = EventsExecutor(context=self.context)
+        calls = []
+        task = executor.create_task(lambda: calls.append(1))
+        task_ref = weakref.ref(task)
+        try:
+            task.cancel()
+            del task
+            gc.collect()
+            self.assertIsNone(task_ref())
+            executor.spin_once(timeout_sec=0)
+            self.assertEqual(calls, [])
+        finally:
+            executor.shutdown(timeout_sec=5)
 
     def test_context_manager(self):
         self.assertIsNotNone(self.node.handle)

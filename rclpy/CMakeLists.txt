@@ -306,6 +306,24 @@ if(BUILD_TESTING)
     set_tests_properties(test_python_allocator_threading PROPERTIES TIMEOUT 60)
     set_tests_properties(test_python_allocator_threading_debug PROPERTIES
       TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
+
+    add_executable(test_events_task_ownership
+      test/test_events_task_ownership.cpp
+      src/rclpy/events_executor/events_queue.cpp)
+    target_include_directories(test_events_task_ownership PRIVATE src/rclpy)
+    target_link_libraries(test_events_task_ownership PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_events_task_ownership PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_events_task_ownership PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_events_task_ownership COMMAND test_events_task_ownership)
+    add_test(NAME test_events_task_ownership_debug COMMAND test_events_task_ownership)
+    set_tests_properties(test_events_task_ownership PROPERTIES TIMEOUT 60)
+    set_tests_properties(test_events_task_ownership_debug PROPERTIES
+      TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
   endif()
 
   if(NOT _typesupport_impls STREQUAL "")
