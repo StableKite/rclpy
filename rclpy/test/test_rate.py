@@ -17,6 +17,8 @@ import time
 
 import pytest
 import rclpy
+from rclpy.clock import Clock
+from rclpy.clock_type import ClockType
 from rclpy.exceptions import ROSInterruptException
 from rclpy.executors import SingleThreadedExecutor
 
@@ -80,7 +82,11 @@ class TestRate:
         rclpy.shutdown(context=self.context)
 
     def test_rate_valid_period(self):
-        rate = self.node.create_rate(FREQ)
+        # Compare monotonic measurements against an explicitly steady timer.
+        # The default ROS clock can follow adjustable system or simulated time.
+        clock = Clock(clock_type=ClockType.STEADY_TIME)
+        rate = self.node.create_rate(FREQ, clock=clock)
+        assert rate._timer.clock is clock
 
         runner = RateRunner(rate)
         while not runner.done:
@@ -88,6 +94,12 @@ class TestRate:
 
         assert runner.max_jitter <= PASS_MAX_SINGLE_JITTER, str(runner)
         assert abs(runner.avg_period - PERIOD) <= PASS_MAX_AVERAGE_JITTER, str(runner)
+
+    def test_rate_default_uses_node_ros_clock(self):
+        rate = self.node.create_rate(FREQ)
+        assert rate._timer.clock is self.node.get_clock()
+        assert rate._timer.clock.clock_type == ClockType.ROS_TIME
+        assert self.node.destroy_rate(rate)
 
     def test_rate_invalid_period(self):
         with pytest.raises(TypeError):
