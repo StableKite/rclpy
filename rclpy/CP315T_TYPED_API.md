@@ -53,7 +53,37 @@ SysMonitor coverage, the latest Windows run still fails an original rate timing
 test; its raw failure and measured coverage are retained separately from the
 passing uninstrumented matrices. Coverage is not final acceptance.
 
-Measured Python/native coverage, final native acceptance, ordinary default-branch
-pip installation and SDK/wheel delivery, all required platform CI, upstream
-followups and independent acceptance remain open. Defaults and releases are
-unchanged. Author qualification is not an independent audit.
+Coverage gaps, separate C SDK coverage, final native acceptance, ordinary
+default-branch pip installation and SDK/wheel delivery, all required platform CI,
+upstream followups and independent acceptance remain open. Defaults and releases
+are unchanged. Author qualification is not an independent audit.
+
+## Measured coverage and clang-cl support
+
+All 66 Python files were measured with no excluded lines or branches on both OS:
+5,203 / 5,699 executable lines (91.2967%) and 1,266 / 1,636 branches (77.3839%).
+The Linux instrumented full registry passes; Windows retains the original
+SysMonitor rate timing failure described above.
+
+Real native coverage now measures all 39 C++ implementation files and lists all
+80 C++/header source files. The complete 56-file Python registry and all 22 native
+CTest cases pass on each instrumented build with natural GIL OFF. Windows uses
+the installed clang-cl 20 toolchain and LLVM source-based coverage; Linux uses
+GCC/gcov with atomic profile updates. No native source files or branches are
+excluded. External SDK code and the separate rcl C library are outside these
+native metrics, and declaration-only headers without emitted regions are listed.
+
+- Windows: 5,245 / 6,492 LLVM executable lines (80.7917%); 962 / 1,618 source
+  branches (59.4561%).
+- Linux: 3,081 / 3,818 GCC emitted source lines (80.6967%); 3,039 / 10,913
+  compiler branch instances (27.8475%), retaining exceptional edges and duplicate
+  template/inline instantiations. This denominator differs from LLVM's metric.
+
+The clang-cl build uses the intended Clang warning groups through `/clang:`;
+plain `-Wall` would select MSVC `/Wall` and enable unrelated warning groups.
+Windows compiler atomics require no ELF libatomic dependency. Warnings remain
+errors. The first failed mixed-toolchain/profile attempts remain in the evidence.
+
+Raw native coverage, profiles, commands and complete reports:
+`A:/Codex/SK-Dependencies-A307-20261030/ros2-native-coverage-export-{Windows,Linux}-20261103-v1/`.
+These measurements are not a 100% coverage claim or final acceptance.

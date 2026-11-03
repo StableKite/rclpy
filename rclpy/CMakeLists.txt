@@ -11,7 +11,10 @@ endif()
 if(NOT CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 11)
 endif()
-if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+if(MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+  # clang-cl interprets plain -Wall as MSVC /Wall (all warning groups).
+  add_compile_options(/clang:-Wall /clang:-Wextra)
+elseif(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra)
 endif()
 
@@ -114,7 +117,7 @@ pybind11_add_module(_rclpy_pybind11
   src/rclpy/wait_set.cpp
 )
 
-if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE AND NOT WIN32)
   target_link_libraries(_rclpy_pybind11 PRIVATE atomic)
 endif()
 
