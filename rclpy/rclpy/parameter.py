@@ -15,7 +15,7 @@
 import array
 from types import GenericAlias
 from enum import Enum
-from typing import Dict, Iterable, Self, cast
+from typing import Callable, Dict, Iterable, Self, TextIO, cast
 from typing import List
 from typing import Optional
 from typing import Tuple
@@ -206,7 +206,7 @@ def get_parameter_value(string_value: str) -> ParameterValue:
     """
     value = ParameterValue()
     try:
-        yaml_value = yaml.safe_load(string_value)
+        yaml_value = cast(Callable[[str | TextIO], object], getattr(yaml, 'safe_load'))(string_value)
     except yaml.parser.ParserError:
         yaml_value = string_value
 
@@ -220,24 +220,25 @@ def get_parameter_value(string_value: str) -> ParameterValue:
         value.type = ParameterType.PARAMETER_DOUBLE
         value.double_value = yaml_value
     elif isinstance(yaml_value, list):
+        yaml_value = cast(list[object], yaml_value)
         if all((isinstance(v, bool) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_BOOL_ARRAY
-            value.bool_array_value = yaml_value
+            value.bool_array_value = cast(list[bool], yaml_value)
         elif all((isinstance(v, int) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_INTEGER_ARRAY
-            value.integer_array_value = yaml_value
+            value.integer_array_value = cast(list[int], yaml_value)
         elif all((isinstance(v, float) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_DOUBLE_ARRAY
-            value.double_array_value = yaml_value
+            value.double_array_value = cast(list[float], yaml_value)
         elif all((isinstance(v, str) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_STRING_ARRAY
-            value.string_array_value = yaml_value
+            value.string_array_value = cast(list[str], yaml_value)
         else:
             value.type = ParameterType.PARAMETER_STRING
             value.string_value = string_value
     else:
         value.type = ParameterType.PARAMETER_STRING
-        value.string_value = yaml_value if yaml_value is not None else string_value
+        value.string_value = yaml_value if isinstance(yaml_value, str) else string_value
     return value
 
 
@@ -298,7 +299,8 @@ def parameter_dict_from_yaml_file(
     :return: A dict of Parameter messages keyed by the parameter names
     """
     with open(parameter_file, 'r') as f:
-        param_file = cast(dict[str, dict[str, dict[str, object]]], yaml.safe_load(f))
+        param_file = cast(dict[str, dict[str, dict[str, object]]],
+                          cast(Callable[[str | TextIO], object], getattr(yaml, 'safe_load'))(f))
         param_keys: list[str] = []
         param_dict: dict[str, object] = {}
 
