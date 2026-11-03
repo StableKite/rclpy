@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
 from typing import Callable
 from typing import Iterable
 from typing import List
@@ -24,7 +25,7 @@ from typing import Union
 from rcl_interfaces.msg import ParameterDescriptor
 from rcl_interfaces.msg import SetParametersResult
 
-import rclpy
+import rclpy.qos
 from rclpy.duration import Duration
 from rclpy.exceptions import ParameterAlreadyDeclaredException
 from rclpy.parameter import Parameter
@@ -120,7 +121,7 @@ def _declare_qos_parameters(
         with the user provided QoS parameter overrides.
     :param options: Options that indicates which parameters are going to be declared.
     """
-    if not issubclass(entity_type, (Publisher, Subscription)):
+    if not issubclass(cast(type[object], entity_type), (Publisher, Subscription)):
         raise TypeError('Argument `entity_type` should be a subclass of Publisher or Subscription')
     entity_type_str = 'publisher' if issubclass(entity_type, Publisher) else 'subscription'
     id_suffix = '' if options.entity_id is None else f'_{options.entity_id}'
@@ -178,7 +179,7 @@ def _get_qos_policy_parameter(qos: QoSProfile, policy: QoSPolicyKind) -> Union[s
 def _override_qos_policy_with_param(qos: QoSProfile,
                                     policy: QoSPolicyKind,
                                     param: Parameter) -> None:
-    value = param.value
+    value: object = param.value
     policy_name = policy.name.lower()
     if policy in (
         QoSPolicyKind.LIVELINESS, QoSPolicyKind.RELIABILITY,
@@ -187,15 +188,19 @@ def _override_qos_policy_with_param(qos: QoSProfile,
         def capitalize_first_letter(x: str) -> str:
             return x[0].upper() + x[1:]
         # e.g. `policy=QosPolicyKind.LIVELINESS` -> `policy_enum_class=rclpy.qos.LivelinessPolicy`
-        policy_enum_class = getattr(
-            rclpy.qos, f'{capitalize_first_letter(policy_name)}Policy')
+        policy_enum_class = cast(type[QoSDurabilityPolicy] | type[QoSHistoryPolicy] | type[QoSLivelinessPolicy] | type[QoSReliabilityPolicy], getattr(
+            rclpy.qos, f'{capitalize_first_letter(policy_name)}Policy'))
         try:
-            value = policy_enum_class[value.upper()]
+            value = policy_enum_class[cast(str, value).upper()]
         except KeyError:
             raise RuntimeError(
                 f'Unexpected QoS override for policy `{policy.name.lower()}`: `{value}`')
     if policy in (
         QoSPolicyKind.LIFESPAN, QoSPolicyKind.DEADLINE, QoSPolicyKind.LIVELINESS_LEASE_DURATION
     ):
-        value = Duration(nanoseconds=value)
+        value = Duration(nanoseconds=cast(int, value))
     setattr(qos, policy.name.lower(), value)
+
+
+# Shared implementation; preserve the existing private entry point.
+declare_qos_parameters = _declare_qos_parameters

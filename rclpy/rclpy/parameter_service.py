@@ -13,7 +13,13 @@
 # limitations under the License.
 
 import weakref
+from typing import cast
+import rclpy
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import rclpy.node
 
+from rcl_interfaces.msg import ParameterDescriptor, ParameterValue
 from rcl_interfaces.msg import ListParametersResult
 from rcl_interfaces.msg import SetParametersResult
 from rcl_interfaces.srv import DescribeParameters, GetParameters, GetParameterTypes
@@ -26,8 +32,8 @@ from rclpy.validate_topic_name import TOPIC_SEPARATOR_STRING
 
 class ParameterService:
 
-    def __init__(self, node):
-        self._node_weak_ref = weakref.ref(node)
+    def __init__(self, node: rclpy.node.Node) -> None:
+        self._node_weak_ref: weakref.ReferenceType[rclpy.node.Node] = weakref.ref(node)
         nodename = node.get_name()
 
         describe_parameters_service_name = \
@@ -65,7 +71,7 @@ class ParameterService:
             qos_profile=qos_profile_parameters
         )
 
-    def _describe_parameters_callback(self, request, response):
+    def _describe_parameters_callback(self, request: DescribeParameters.Request, response: DescribeParameters.Response) -> DescribeParameters.Response:
         node = self._get_node()
         for name in request.names:
             try:
@@ -73,40 +79,40 @@ class ParameterService:
             except ParameterNotDeclaredException:
                 response.descriptors = node.describe_parameters([])
                 return response
-            response.descriptors.append(descriptor)
+            cast(list[ParameterDescriptor], response.descriptors).append(descriptor)
         return response
 
-    def _get_parameters_callback(self, request, response):
+    def _get_parameters_callback(self, request: GetParameters.Request, response: GetParameters.Response) -> GetParameters.Response:
         node = self._get_node()
         for name in request.names:
             try:
                 param = node.get_parameter(name)
             except (ParameterNotDeclaredException, ParameterUninitializedException):
-                response.values = node.get_parameters([])
+                response.values = cast(list[ParameterValue], node.get_parameters([]))
                 return response
-            response.values.append(param.get_parameter_value())
+            cast(list[ParameterValue], response.values).append(param.get_parameter_value())
         return response
 
-    def _get_parameter_types_callback(self, request, response):
+    def _get_parameter_types_callback(self, request: GetParameterTypes.Request, response: GetParameterTypes.Response) -> GetParameterTypes.Response:
         node = self._get_node()
         for name in request.names:
             try:
                 value = node.get_parameter_type(name)
             except ParameterNotDeclaredException:
-                response.types = node.get_parameter_types([])
+                response.types = cast(list[int], node.get_parameter_types([]))
                 return response
-            response.types.append(value)
+            response.types.append(value.value if isinstance(value, Parameter.Type) else value)
         return response
 
-    def _list_parameters_callback(self, request, response):
+    def _list_parameters_callback(self, request: ListParameters.Request, response: ListParameters.Response) -> ListParameters.Response:
         node = self._get_node()
         try:
-            response.result = node.list_parameters(request.prefixes, request.depth)
+            response.result = node.list_parameters(cast(list[str], request.prefixes), request.depth)
         except (TypeError, ValueError):
             response.result = ListParametersResult()
         return response
 
-    def _set_parameters_callback(self, request, response):
+    def _set_parameters_callback(self, request: SetParameters.Request, response: SetParameters.Response) -> SetParameters.Response:
         node = self._get_node()
         for p in request.parameters:
             param = Parameter.from_parameter_msg(p)
@@ -117,10 +123,10 @@ class ParameterService:
                     successful=False,
                     reason=str(e)
                 )
-            response.results.append(result)
+            cast(list[SetParametersResult], response.results).append(result)
         return response
 
-    def _set_parameters_atomically_callback(self, request, response):
+    def _set_parameters_atomically_callback(self, request: SetParametersAtomically.Request, response: SetParametersAtomically.Response) -> SetParametersAtomically.Response:
         node = self._get_node()
         try:
             response.result = node.set_parameters_atomically([
@@ -132,7 +138,7 @@ class ParameterService:
                 )
         return response
 
-    def _get_node(self):
+    def _get_node(self) -> rclpy.node.Node:
         node = self._node_weak_ref()
         if node is None:
             raise ReferenceError('Expected valid node weak reference')

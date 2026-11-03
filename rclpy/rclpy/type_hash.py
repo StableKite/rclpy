@@ -13,6 +13,14 @@
 # limitations under the License.
 
 
+from typing import TypedDict
+
+
+class TypeHashFields(TypedDict):
+    version: int
+    value: bytes
+
+
 class TypeHash:
     """Type hash."""
 

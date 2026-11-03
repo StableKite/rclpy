@@ -12,13 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from enum import IntEnum
-from typing import Callable
+from typing import Type
+from typing import Callable, Generic, TypeVar, TYPE_CHECKING, cast
+from types import TracebackType
 from typing import List
 from typing import Optional
 import warnings
 
 import rclpy
+if TYPE_CHECKING:
+    import rclpy.executors
 from rclpy.callback_groups import CallbackGroup
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.logging import get_logger
@@ -70,30 +73,40 @@ IncompatibleTypeInfo = _rclpy.rmw_incompatible_type_status_t
 UnsupportedEventTypeError = _rclpy.UnsupportedEventTypeError
 
 
-class EventHandler(Waitable):
+EventInfo = (QoSRequestedDeadlineMissedInfo | QoSLivelinessChangedInfo |
+             QoSMessageLostInfo | QoSRequestedIncompatibleQoSInfo |
+             QoSSubscriptionMatchedInfo | QoSOfferedDeadlineMissedInfo |
+             QoSLivelinessLostInfo | IncompatibleTypeInfo)
+_EventT = TypeVar('_EventT', bound=EventInfo, default=EventInfo)
+_EventKind = QoSPublisherEventType | QoSSubscriptionEventType
+_EventParent = _rclpy.Publisher | _rclpy.Subscription
+
+
+class EventHandler(Waitable[Optional[_EventT]], Generic[_EventT]):
     """Waitable type to handle QoS events."""
 
     def __init__(
         self,
         *,
         callback_group: CallbackGroup,
-        callback: Callable,
-        event_type: IntEnum,
-        parent_impl,
-    ):
+        callback: Callable[[_EventT], object],
+        event_type: _EventKind,
+        parent_impl: _EventParent,
+    ) -> None:
         # Waitable init adds self to callback_group
         super().__init__(callback_group)
         self.event_type = event_type
         self.callback = callback
 
         with parent_impl:
-            self.__event = _rclpy.EventHandle(parent_impl, event_type)
+            self.__event = cast(Callable[[_EventParent, _EventKind], _rclpy.EventHandle],
+                _rclpy.EventHandle)(parent_impl, event_type)
 
         self._ready_to_take_data = False
         self._event_index = None
 
     # Start Waitable API
-    def is_ready(self, wait_set):
+    def is_ready(self, wait_set: _rclpy.WaitSet) -> bool:
         """Return True if entities are ready in the wait set."""
         if self._event_index is None:
             return False
@@ -101,52 +114,56 @@ class EventHandler(Waitable):
             self._ready_to_take_data = True
         return self._ready_to_take_data
 
-    def take_data(self):
+    def take_data(self) -> Optional[_EventT]:
         """Take stuff from lower level so the wait set doesn't immediately wake again."""
         if self._ready_to_take_data:
             self._ready_to_take_data = False
             with self.__event:
-                return self.__event.take_event()
+                return cast(Optional[_EventT], self.__event.take_event())
         return None
 
-    async def execute(self, taken_data):
+    async def execute(self, taken_data: Optional[_EventT]) -> None:
         """Execute work after data has been taken from a ready wait set."""
         if not taken_data:
             return
         await rclpy.executors.await_or_execute(self.callback, taken_data)
 
-    def get_num_entities(self):
+    def get_num_entities(self) -> NumberOfEntities:
         """Return number of each type of entity used."""
         return NumberOfEntities(num_events=1)
 
-    def add_to_wait_set(self, wait_set):
+    def add_to_wait_set(self, wait_set: _rclpy.WaitSet) -> None:
         """Add entites to wait set."""
         with self.__event:
             self._event_index = wait_set.add_event(self.__event)
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         """Mark event as in-use to prevent destruction while waiting on it."""
         self.__event.__enter__()
 
-    def __exit__(self, t, v, tb):
+    def __exit__(self, t: Optional[Type[BaseException]], v: Optional[BaseException], tb: Optional[TracebackType]) -> None:
         """Mark event as not-in-use to allow destruction after waiting on it."""
         self.__event.__exit__(t, v, tb)
 
-    def destroy(self):
+    def destroy(self) -> None:
         self.__event.destroy_when_not_in_use()
 
 
-class QoSEventHandler(EventHandler):
+class QoSEventHandler(EventHandler[_EventT]):
 
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, **kwargs: object) -> None:
         warnings.warn('QoSEventHandler foo is deprecated, use EventHandler instead.',
                       DeprecationWarning, stacklevel=2)
         super().__init_subclass__(**kwargs)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self, *, callback_group: CallbackGroup, callback: Callable[[_EventT], object],
+        event_type: _EventKind, parent_impl: _EventParent
+    ) -> None:
         warnings.warn('QoSEventHandler is deprecated, use EventHandler instead.',
                       DeprecationWarning, stacklevel=2)
-        super().__init__(*args, **kwargs)
+        super().__init__(callback_group=callback_group, callback=callback,
+                         event_type=event_type, parent_impl=parent_impl)
 
 
 class SubscriptionEventCallbacks:
@@ -194,21 +211,21 @@ class SubscriptionEventCallbacks:
         with subscription:
             logger = get_logger(subscription.get_logger_name())
 
-        event_handlers = []
+        event_handlers: list[EventHandler] = []
         if self.deadline:
-            event_handlers.append(EventHandler(
+            event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                 callback_group=callback_group,
                 callback=self.deadline,
                 event_type=QoSSubscriptionEventType.RCL_SUBSCRIPTION_REQUESTED_DEADLINE_MISSED,
-                parent_impl=subscription))
+                parent_impl=subscription)))
 
         incompatible_qos_callback = None
         if self.incompatible_qos:
             incompatible_qos_callback = self.incompatible_qos
         elif self.use_default_callbacks:
             # Register default callback when not specified
-            def _default_incompatible_qos_callback(event):
-                policy_name = qos_policy_name_from_kind(event.last_policy_kind)
+            def _default_incompatible_qos_callback(event: QoSRequestedIncompatibleQoSInfo) -> None:
+                policy_name = qos_policy_name_from_kind(int(event.last_policy_kind))
                 logger.warn(
                     "New publisher discovered on topic '{}', offering incompatible QoS. "
                     'No messages will be received from it. '
@@ -217,55 +234,55 @@ class SubscriptionEventCallbacks:
         try:
             if incompatible_qos_callback is not None:
                 event_type = QoSSubscriptionEventType.RCL_SUBSCRIPTION_REQUESTED_INCOMPATIBLE_QOS
-                event_handlers.append(EventHandler(
+                event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                     callback_group=callback_group,
                     callback=incompatible_qos_callback,
                     event_type=event_type,
-                    parent_impl=subscription))
+                    parent_impl=subscription)))
         except UnsupportedEventTypeError:
             pass
 
         if self.liveliness:
-            event_handlers.append(EventHandler(
+            event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                 callback_group=callback_group,
                 callback=self.liveliness,
                 event_type=QoSSubscriptionEventType.RCL_SUBSCRIPTION_LIVELINESS_CHANGED,
-                parent_impl=subscription))
+                parent_impl=subscription)))
 
         if self.message_lost:
-            event_handlers.append(EventHandler(
+            event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                 callback_group=callback_group,
                 callback=self.message_lost,
                 event_type=QoSSubscriptionEventType.RCL_SUBSCRIPTION_MESSAGE_LOST,
-                parent_impl=subscription))
+                parent_impl=subscription)))
 
         incompatible_type_callback = None
         if self.incompatible_type:
             incompatible_type_callback = self.incompatible_type
         elif self.use_default_callbacks:
             # Register default callback when not specified
-            def _default_incompatible_type_callback(event):
+            def _default_incompatible_type_callback(event: IncompatibleTypeInfo) -> None:
                 logger.warn(
                     "Incompatible type on topic '{}', no messages will be sent to it."
                     .format(topic_name))
             incompatible_type_callback = _default_incompatible_type_callback
         try:
             if incompatible_type_callback is not None:
-                event_handlers.append(EventHandler(
+                event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                     callback_group=callback_group,
                     callback=incompatible_type_callback,
                     event_type=QoSSubscriptionEventType.RCL_SUBSCRIPTION_INCOMPATIBLE_TYPE,
-                    parent_impl=subscription))
+                    parent_impl=subscription)))
 
         except UnsupportedEventTypeError:
             pass
 
         if self.matched:
-            event_handlers.append(EventHandler(
+            event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                 callback_group=callback_group,
                 callback=self.matched,
                 event_type=QoSSubscriptionEventType.RCL_SUBSCRIPTION_MATCHED,
-                parent_impl=subscription))
+                parent_impl=subscription)))
 
         return event_handlers
 
@@ -312,28 +329,28 @@ class PublisherEventCallbacks:
         with publisher:
             logger = get_logger(publisher.get_logger_name())
 
-        event_handlers = []
+        event_handlers: list[EventHandler] = []
         if self.deadline:
-            event_handlers.append(EventHandler(
+            event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                 callback_group=callback_group,
                 callback=self.deadline,
                 event_type=QoSPublisherEventType.RCL_PUBLISHER_OFFERED_DEADLINE_MISSED,
-                parent_impl=publisher))
+                parent_impl=publisher)))
 
         if self.liveliness:
-            event_handlers.append(EventHandler(
+            event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                 callback_group=callback_group,
                 callback=self.liveliness,
                 event_type=QoSPublisherEventType.RCL_PUBLISHER_LIVELINESS_LOST,
-                parent_impl=publisher))
+                parent_impl=publisher)))
 
         incompatible_qos_callback = None
         if self.incompatible_qos:
             incompatible_qos_callback = self.incompatible_qos
         elif self.use_default_callbacks:
             # Register default callback when not specified
-            def _default_incompatible_qos_callback(event):
-                policy_name = qos_policy_name_from_kind(event.last_policy_kind)
+            def _default_incompatible_qos_callback(event: QoSRequestedIncompatibleQoSInfo) -> None:
+                policy_name = qos_policy_name_from_kind(int(event.last_policy_kind))
                 logger.warn(
                     "New subscription discovered on topic '{}', requesting incompatible QoS. "
                     'No messages will be sent to it. '
@@ -341,11 +358,11 @@ class PublisherEventCallbacks:
             incompatible_qos_callback = _default_incompatible_qos_callback
         try:
             if incompatible_qos_callback is not None:
-                event_handlers.append(EventHandler(
+                event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                     callback_group=callback_group,
                     callback=incompatible_qos_callback,
                     event_type=QoSPublisherEventType.RCL_PUBLISHER_OFFERED_INCOMPATIBLE_QOS,
-                    parent_impl=publisher))
+                    parent_impl=publisher)))
 
         except UnsupportedEventTypeError:
             pass
@@ -355,27 +372,27 @@ class PublisherEventCallbacks:
             incompatible_type_callback = self.incompatible_type
         elif self.use_default_callbacks:
             # Register default callback when not specified
-            def _default_incompatible_type_callback(event):
+            def _default_incompatible_type_callback(event: IncompatibleTypeInfo) -> None:
                 logger.warn(
                     "Incompatible type on topic '{}', no messages will be sent to it."
                     .format(topic_name))
             incompatible_type_callback = _default_incompatible_type_callback
         try:
             if incompatible_type_callback is not None:
-                event_handlers.append(EventHandler(
+                event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                     callback_group=callback_group,
                     callback=incompatible_type_callback,
                     event_type=QoSPublisherEventType.RCL_PUBLISHER_INCOMPATIBLE_TYPE,
-                    parent_impl=publisher))
+                    parent_impl=publisher)))
 
         except UnsupportedEventTypeError:
             pass
 
         if self.matched:
-            event_handlers.append(EventHandler(
+            event_handlers.append(cast(EventHandler[EventInfo], EventHandler(
                 callback_group=callback_group,
                 callback=self.matched,
                 event_type=QoSPublisherEventType.RCL_PUBLISHER_MATCHED,
-                parent_impl=publisher))
+                parent_impl=publisher)))
 
         return event_handlers

@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from rcl_interfaces.msg import LoggerLevel, SetLoggerLevelsResult
 from rcl_interfaces.srv import GetLoggerLevels
 from rcl_interfaces.srv import SetLoggerLevels
-import rclpy
+import rclpy.logging
 from rclpy.impl.logging_severity import LoggingSeverity
 from rclpy.qos import qos_profile_services_default
 from rclpy.validate_topic_name import TOPIC_SEPARATOR_STRING
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 class LoggingService:
 
-    def __init__(self, node: 'Node'):
+    def __init__(self, node: 'Node') -> None:
         node_name = node.get_name()
 
         get_logger_name_service_name = \
@@ -55,7 +55,7 @@ class LoggingService:
             except RuntimeError:
                 ret_level = LoggingSeverity.UNSET
             logger_level.level = ret_level
-            response.levels.append(logger_level)
+            cast(list[LoggerLevel], response.levels).append(logger_level)
         return response
 
     def _set_logger_levels(self, request: SetLoggerLevels.Request,
@@ -70,5 +70,5 @@ class LoggingService:
                 result.reason = 'Failed reason: Invalid logger level.'
             except RuntimeError as e:
                 result.reason = str(e)
-            response.results.append(result)
+            cast(list[SetLoggerLevelsResult], response.results).append(result)
         return response

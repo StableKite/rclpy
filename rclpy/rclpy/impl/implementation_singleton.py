@@ -26,7 +26,13 @@ For example, you might use it like this:
         # ...
 """
 
+from typing import TYPE_CHECKING
+
 from rpyutils import import_c_library
 package = 'rclpy'
 
-rclpy_implementation = import_c_library('._rclpy_pybind11', package)
+if TYPE_CHECKING:
+    from rclpy import _rclpy_pybind11 as _rclpy_pybind11
+    rclpy_implementation = _rclpy_pybind11
+else:
+    rclpy_implementation = import_c_library('._rclpy_pybind11', package)

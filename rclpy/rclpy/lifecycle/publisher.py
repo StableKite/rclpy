@@ -12,20 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Union
+from typing import Union, cast
 
 from rclpy.publisher import MsgType
 from rclpy.publisher import Publisher
+from rclpy.callback_groups import CallbackGroup
+from rclpy.event_handler import PublisherEventCallbacks
+from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
+from rclpy.qos import QoSProfile
 
 from .managed_entity import SimpleManagedEntity
 
 
-class LifecyclePublisher(SimpleManagedEntity, Publisher):
+class LifecyclePublisher(SimpleManagedEntity, Publisher[MsgType]):
     """Managed publisher entity."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self, publisher_impl: _rclpy.Publisher, msg_type: type[MsgType], topic: str,
+        qos_profile: QoSProfile, event_callbacks: PublisherEventCallbacks,
+        callback_group: CallbackGroup
+    ) -> None:
         SimpleManagedEntity.__init__(self)
-        Publisher.__init__(self, *args, **kwargs)
+        Publisher.__init__(cast(Publisher[object], self), publisher_impl, msg_type, topic, qos_profile, event_callbacks,
+                           callback_group)
 
     @SimpleManagedEntity.when_enabled
     def publish(self, msg: Union[MsgType, bytes]) -> None:
@@ -34,4 +43,4 @@ class LifecyclePublisher(SimpleManagedEntity, Publisher):
 
         See rclpy.publisher.Publisher.publish() for more details.
         """
-        Publisher.publish(self, msg)
+        Publisher.publish(cast(Publisher[object], self), msg)

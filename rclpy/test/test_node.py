@@ -2688,3 +2688,58 @@ class TestNodeParamsFile(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@pytest.mark.parametrize('factory', ['publisher', 'subscription', 'client', 'service'])
+def test_native_factory_value_error_preserves_original_exception(factory):
+    from unittest.mock import patch
+    from rclpy.impl.implementation_singleton import rclpy_implementation as native
+
+    context = rclpy.context.Context()
+    rclpy.init(context=context)
+    node = rclpy.create_node('factory_value_error_regression', context=context)
+    try:
+        operations = {
+            'publisher': lambda: node.create_publisher(BasicTypes, 'valid_topic', 1),
+            'subscription': lambda: node.create_subscription(
+                BasicTypes, 'valid_topic', lambda message: None, 1),
+            'client': lambda: node.create_client(GetParameters, 'valid_service'),
+            'service': lambda: node.create_service(
+                GetParameters, 'valid_service', lambda request, response: response),
+        }
+        original = ValueError('controlled native constructor rejection')
+        with patch.object(native, factory.title(), side_effect=original):
+            with pytest.raises(ValueError) as caught:
+                operations[factory]()
+        assert caught.value is original
+    finally:
+        node.destroy_node()
+        rclpy.shutdown(context=context)
+
+
+def test_parameter_type_service_serializes_undeclared_not_set_enum():
+    from rcl_interfaces.srv import GetParameterTypes
+    from rclpy.parameter_service import ParameterService
+
+    context = rclpy.context.Context()
+    rclpy.init(context=context)
+    node = rclpy.create_node(
+        'parameter_type_not_set_regression', context=context,
+        allow_undeclared_parameters=True, start_parameter_services=False)
+    try:
+        node.declare_parameter('declared_integer', 123)
+        node.declare_parameter('declared_bool', True)
+        service = ParameterService(node)
+        request = GetParameterTypes.Request(
+            names=['undeclared_name', 'declared_integer', 'declared_bool'])
+        response = GetParameterTypes.Response()
+        actual = service._get_parameter_types_callback(request, response)
+        assert actual is response
+        assert list(actual.types) == [
+            ParameterType.PARAMETER_NOT_SET,
+            ParameterType.PARAMETER_INTEGER,
+            ParameterType.PARAMETER_BOOL,
+        ]
+    finally:
+        node.destroy_node()
+        rclpy.shutdown(context=context)

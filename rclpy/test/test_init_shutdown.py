@@ -109,3 +109,18 @@ def test_signal_handlers():
 def test_init_with_invalid_domain_id():
     with pytest.raises(RuntimeError):
         rclpy.init(domain_id=-1)
+
+
+def test_global_executor_shutdown_and_reinitialization():
+    rclpy.init()
+    try:
+        first = rclpy.get_global_executor()
+    finally:
+        rclpy.shutdown()
+
+    rclpy.init()
+    try:
+        second = rclpy.get_global_executor()
+        assert second is not first
+    finally:
+        rclpy.shutdown()

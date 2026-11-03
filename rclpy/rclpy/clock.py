@@ -14,8 +14,9 @@
 
 from enum import IntEnum
 from types import TracebackType
-from typing import TYPE_CHECKING, Callable, Optional, Protocol, Type, TypedDict
+from typing import TYPE_CHECKING, Callable, Optional, Protocol, Type, TypedDict, cast
 
+from rclpy import native_types
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 from .clock_type import ClockType
@@ -31,10 +32,10 @@ if TYPE_CHECKING:
 
 
 class ClockChange(IntEnum):
-    ROS_TIME_NO_CHANGE = _rclpy.ClockChange.ROS_TIME_NO_CHANGE
-    ROS_TIME_ACTIVATED = _rclpy.ClockChange.ROS_TIME_ACTIVATED
-    ROS_TIME_DEACTIVATED = _rclpy.ClockChange.ROS_TIME_DEACTIVATED
-    SYSTEM_TIME_NO_CHANGE = _rclpy.ClockChange.SYSTEM_TIME_NO_CHANGE
+    ROS_TIME_NO_CHANGE = int(_rclpy.ClockChange.ROS_TIME_NO_CHANGE)
+    ROS_TIME_ACTIVATED = int(_rclpy.ClockChange.ROS_TIME_ACTIVATED)
+    ROS_TIME_DEACTIVATED = int(_rclpy.ClockChange.ROS_TIME_DEACTIVATED)
+    SYSTEM_TIME_NO_CHANGE = int(_rclpy.ClockChange.SYSTEM_TIME_NO_CHANGE)
 
 
 class JumpThreshold:
@@ -70,14 +71,14 @@ class JumpThreshold:
 
 class TimeJump:
 
-    def __init__(self, clock_change: ClockChange, delta: Duration):
-        if not isinstance(clock_change, (ClockChange, _rclpy.ClockChange)):
+    def __init__(self, clock_change: ClockChange | _rclpy.ClockChange, delta: Duration):
+        if not isinstance(cast(object, clock_change), (ClockChange, _rclpy.ClockChange)):
             raise TypeError('clock_change must be an instance of rclpy.clock.ClockChange')
         self._clock_change = clock_change
         self._delta = delta
 
     @property
-    def clock_change(self) -> ClockChange:
+    def clock_change(self) -> ClockChange | _rclpy.ClockChange:
         return self._clock_change
 
     @property
@@ -188,12 +189,12 @@ class ClockHandle(DestroyableType, Protocol):
 class Clock:
 
     if TYPE_CHECKING:
-        __clock: ClockHandle
-        _clock_type: ClockType
+        __clock: native_types.Clock
+        _clock_type: ClockType | _rclpy.ClockType
 
     def __new__(cls, *,
-                clock_type: ClockType = ClockType.SYSTEM_TIME) -> 'Clock':
-        if not isinstance(clock_type, (ClockType, _rclpy.ClockType)):
+                clock_type: ClockType | _rclpy.ClockType = ClockType.SYSTEM_TIME) -> 'Clock':
+        if not isinstance(cast(object, clock_type), (ClockType, _rclpy.ClockType)):
             raise TypeError('Clock type must be a ClockType enum')
         if clock_type is ClockType.ROS_TIME:
             self: 'Clock' = object.__new__(ROSClock)
@@ -204,11 +205,11 @@ class Clock:
         return self
 
     @property
-    def clock_type(self) -> ClockType:
+    def clock_type(self) -> ClockType | _rclpy.ClockType:
         return self._clock_type
 
     @property
-    def handle(self) -> ClockHandle:
+    def handle(self) -> native_types.Clock:
         """
         Return the internal instance of ``rclpy::Clock``.
 

@@ -14,7 +14,7 @@
 
 import threading
 import time
-from typing import Dict
+from typing import Dict, Generic, cast
 from typing import Optional
 from typing import TypeVar
 
@@ -25,19 +25,18 @@ from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.qos import QoSProfile
 from rclpy.service_introspection import ServiceIntrospectionState
 from rclpy.task import Future
+from rclpy.type_support import ServiceType
 
-# Used for documentation purposes only
-SrvType = TypeVar('SrvType')
-SrvTypeRequest = TypeVar('SrvTypeRequest')
-SrvTypeResponse = TypeVar('SrvTypeResponse')
+SrvTypeRequest = TypeVar('SrvTypeRequest', default=object)
+SrvTypeResponse = TypeVar('SrvTypeResponse', default=object)
 
 
-class Client:
+class Client(Generic[SrvTypeRequest, SrvTypeResponse]):
     def __init__(
         self,
         context: Context,
         client_impl: _rclpy.Client,
-        srv_type: SrvType,
+        srv_type: ServiceType[SrvTypeRequest, SrvTypeResponse],
         srv_name: str,
         qos_profile: QoSProfile,
         callback_group: CallbackGroup
@@ -62,7 +61,7 @@ class Client:
         self.srv_name = srv_name
         self.qos_profile = qos_profile
         # Key is a sequence number, value is an instance of a Future
-        self._pending_requests: Dict[int, Future] = {}
+        self._pending_requests: Dict[int, Future[SrvTypeResponse]] = {}
         self.callback_group = callback_group
         # True when the callback is ready to fire but has not been "taken" by an executor
         self._executor_event = False
@@ -86,12 +85,12 @@ class Client:
           of the Request type of the provided service when the client was
           constructed.
         """
-        if not isinstance(request, self.srv_type.Request):
+        if not isinstance(cast(object, request), self.srv_type.Request):
             raise TypeError()
 
         event = threading.Event()
 
-        def unblock(future):
+        def unblock(future: Future[SrvTypeResponse]) -> None:
             nonlocal event
             event.set()
 
@@ -106,10 +105,10 @@ class Client:
                 # Timed out. remove_pending_request() to free resources
                 self.remove_pending_request(future)
         if future.exception() is not None:
-            raise future.exception()
+            raise cast(BaseException, future.exception())
         return future.result()
 
-    def call_async(self, request: SrvTypeRequest) -> Future:
+    def call_async(self, request: SrvTypeRequest) -> Future[SrvTypeResponse]:
         """
         Make a service request and asynchronously get the result.
 
@@ -119,7 +118,7 @@ class Client:
           of the Request type of the provided service when the client was
           constructed.
         """
-        if not isinstance(request, self.srv_type.Request):
+        if not isinstance(cast(object, request), self.srv_type.Request):
             raise TypeError()
 
         with self._lock:
@@ -128,14 +127,14 @@ class Client:
             if sequence_number in self._pending_requests:
                 raise RuntimeError(f'Sequence ({sequence_number}) conflicts with pending request')
 
-            future = Future()
+            future: Future[SrvTypeResponse] = Future()
             self._pending_requests[sequence_number] = future
 
             future.add_done_callback(self.remove_pending_request)
 
         return future
 
-    def get_pending_request(self, sequence_number: int) -> Future:
+    def get_pending_request(self, sequence_number: int) -> Future[SrvTypeResponse]:
         """
         Get a future from the list of pending requests.
 
@@ -146,7 +145,7 @@ class Client:
         with self._lock:
             return self._pending_requests[sequence_number]
 
-    def remove_pending_request(self, future: Future) -> None:
+    def remove_pending_request(self, future: Future[SrvTypeResponse]) -> None:
         """
         Remove a future from the list of pending requests.
 
@@ -208,7 +207,7 @@ class Client:
                                                   introspection_state)
 
     @property
-    def handle(self):
+    def handle(self) -> _rclpy.Client:
         return self.__client
 
     @property
@@ -222,7 +221,7 @@ class Client:
         with self.handle:
             return self.__client.get_logger_name()
 
-    def destroy(self):
+    def destroy(self) -> None:
         """
         Destroy a container for a ROS service client.
 

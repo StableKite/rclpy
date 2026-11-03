@@ -26,6 +26,7 @@ from typing import Type
 from typing import Union
 from weakref import WeakMethod
 
+from rclpy import native_types
 from rclpy.destroyable import DestroyableType
 
 _ShutdownCallback = Callable[[], object]
@@ -81,10 +82,10 @@ class Context(ContextManager['Context']):
         self._cleanup_active = False
         self._callbacks: Dict[object, _CallbackReference] = {}
         self._logging_initialized = False
-        self.__context: Optional[ContextHandle] = None
+        self.__context: Optional[native_types.Context] = None
 
     @property
-    def handle(self) -> Optional[ContextHandle]:
+    def handle(self) -> Optional[native_types.Context]:
         return self.__context
 
     def destroy(self) -> None:

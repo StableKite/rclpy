@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
+from typing import TYPE_CHECKING
 
-ServiceIntrospectionState = _rclpy.service_introspection.ServiceIntrospectionState
+if TYPE_CHECKING:
+    from rclpy.impl.service_introspection import ServiceIntrospectionState as ServiceIntrospectionState
+else:
+    from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
+
+    ServiceIntrospectionState = _rclpy.service_introspection.ServiceIntrospectionState

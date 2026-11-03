@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Union
+from typing import Literal, TypeVar, Union, cast
 
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.node import Node
@@ -21,14 +21,9 @@ from rclpy.signals import SignalHandlerGuardCondition
 from rclpy.utilities import timeout_sec_to_nsec
 
 
-def wait_for_message(
-    msg_type,
-    node: 'Node',
-    topic: str,
-    *,
-    qos_profile: Union[QoSProfile, int] = 1,
-    time_to_wait=-1
-):
+MsgType = TypeVar('MsgType')
+
+def wait_for_message(msg_type: type[MsgType], node: 'Node', topic: str, *, qos_profile: Union[QoSProfile, int]=1, time_to_wait: Union[int, float]=-1) -> tuple[Literal[True], MsgType] | tuple[Literal[False], None]:
     """
     Wait for the next incoming message.
 
@@ -41,7 +36,7 @@ def wait_for_message(
         could not be obtained or shutdown was triggered asynchronously on the context.
     """
     context = node.context
-    wait_set = _rclpy.WaitSet(1, 1, 0, 0, 0, 0, context.handle)
+    wait_set = _rclpy.WaitSet(1, 1, 0, 0, 0, 0, cast(_rclpy.Context, context.handle))
     wait_set.clear_entities()
 
     sub = node.create_subscription(msg_type, topic, lambda _: None, qos_profile=qos_profile)
@@ -64,7 +59,7 @@ def wait_for_message(
             if sub.handle.pointer in subs_ready:
                 msg_info = sub.handle.take_message(sub.msg_type, sub.raw)
                 if msg_info is not None:
-                    return True, msg_info[0]
+                    return True, cast(MsgType, msg_info[0])
     finally:
         node.destroy_subscription(sub)
 

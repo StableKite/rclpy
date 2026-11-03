@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable
+from typing import Callable, Coroutine, Generic, cast
 from typing import TypeVar
 
 from rclpy.callback_groups import CallbackGroup
@@ -20,20 +20,19 @@ from rclpy.clock import Clock
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.qos import QoSProfile
 from rclpy.service_introspection import ServiceIntrospectionState
+from rclpy.type_support import ServiceType
 
-# Used for documentation purposes only
-SrvType = TypeVar('SrvType')
-SrvTypeRequest = TypeVar('SrvTypeRequest')
-SrvTypeResponse = TypeVar('SrvTypeResponse')
+SrvTypeRequest = TypeVar('SrvTypeRequest', default=object)
+SrvTypeResponse = TypeVar('SrvTypeResponse', default=object)
 
 
-class Service:
+class Service(Generic[SrvTypeRequest, SrvTypeResponse]):
     def __init__(
         self,
         service_impl: _rclpy.Service,
-        srv_type: SrvType,
+        srv_type: ServiceType[SrvTypeRequest, SrvTypeResponse],
         srv_name: str,
-        callback: Callable[[SrvTypeRequest, SrvTypeResponse], SrvTypeResponse],
+        callback: Callable[[SrvTypeRequest, SrvTypeResponse], SrvTypeResponse | Coroutine[object, object, SrvTypeResponse]],
         callback_group: CallbackGroup,
         qos_profile: QoSProfile
     ) -> None:
@@ -61,7 +60,10 @@ class Service:
         self._executor_event = False
         self.qos_profile = qos_profile
 
-    def send_response(self, response: SrvTypeResponse, header) -> None:
+    def send_response(
+        self, response: SrvTypeResponse,
+        header: _rclpy.rmw_service_info_t | _rclpy.rmw_request_id_t
+    ) -> None:
         """
         Send a service response.
 
@@ -71,13 +73,13 @@ class Service:
           of the Response type of the provided service when the service was
           constructed.
         """
-        if not isinstance(response, self.srv_type.Response):
+        if not isinstance(cast(object, response), self.srv_type.Response):
             raise TypeError()
         with self.handle:
-            if isinstance(header, _rclpy.rmw_service_info_t):
-                self.__service.service_send_response(response, header.request_id)
-            elif isinstance(header, _rclpy.rmw_request_id_t):
-                self.__service.service_send_response(response, header)
+            if isinstance(cast(object, header), _rclpy.rmw_service_info_t):
+                self.__service.service_send_response(response, cast(_rclpy.rmw_service_info_t, header).request_id)
+            elif isinstance(cast(object, header), _rclpy.rmw_request_id_t):
+                self.__service.service_send_response(response, cast(_rclpy.rmw_request_id_t, header))
             else:
                 raise TypeError()
 
@@ -99,7 +101,7 @@ class Service:
                                                    introspection_state)
 
     @property
-    def handle(self):
+    def handle(self) -> _rclpy.Service:
         return self.__service
 
     @property
@@ -113,7 +115,7 @@ class Service:
         with self.handle:
             return self.__service.get_logger_name()
 
-    def destroy(self):
+    def destroy(self) -> None:
         """
         Destroy a container for a ROS service server.
 

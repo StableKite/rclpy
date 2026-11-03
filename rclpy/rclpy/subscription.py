@@ -15,7 +15,7 @@
 from enum import Enum
 import inspect
 from typing import Callable
-from typing import TypeVar
+from typing import Generic, TypeVar, TypedDict
 
 from rclpy.callback_groups import CallbackGroup
 from rclpy.event_handler import EventHandler
@@ -28,11 +28,23 @@ from rclpy.subscription_content_filter_options import ContentFilterOptions
 # Re-export exception defined in _rclpy C extension.
 RCLError = _rclpy.RCLError
 
-# For documentation only
-MsgType = TypeVar('MsgType')
+MsgType = TypeVar('MsgType', default=object)
+DeliveryT = TypeVar('DeliveryT', default=MsgType)
 
 
-class Subscription:
+class MessageInfo(TypedDict):
+    """Metadata produced by the native Subscription.take_message implementation."""
+
+    source_timestamp: int
+    received_timestamp: int
+    publication_sequence_number: int | None
+    reception_sequence_number: int | None
+
+
+SubscriptionCallback = Callable[[MsgType], object] | Callable[[MsgType, MessageInfo], object]
+
+
+class Subscription(Generic[MsgType, DeliveryT]):
 
     class CallbackType(Enum):
         MessageOnly = 0
@@ -41,9 +53,9 @@ class Subscription:
     def __init__(
          self,
          subscription_impl: _rclpy.Subscription,
-         msg_type: MsgType,
+         msg_type: type[MsgType],
          topic: str,
-         callback: Callable,
+         callback: SubscriptionCallback[DeliveryT],
          callback_group: CallbackGroup,
          qos_profile: QoSProfile,
          raw: bool,
@@ -77,7 +89,7 @@ class Subscription:
         self.qos_profile = qos_profile
         self.raw = raw
 
-        self.event_handlers: EventHandler = event_callbacks.create_event_handlers(
+        self.event_handlers: list[EventHandler] = event_callbacks.create_event_handlers(
             callback_group, subscription_impl, topic)
 
     def get_publisher_count(self) -> int:
@@ -86,10 +98,10 @@ class Subscription:
             return self.__subscription.get_publisher_count()
 
     @property
-    def handle(self):
+    def handle(self) -> _rclpy.Subscription:
         return self.__subscription
 
-    def destroy(self):
+    def destroy(self) -> None:
         """
         Destroy a container for a ROS subscription.
 
@@ -101,16 +113,16 @@ class Subscription:
         self.handle.destroy_when_not_in_use()
 
     @property
-    def topic_name(self):
+    def topic_name(self) -> str:
         with self.handle:
             return self.__subscription.get_topic_name()
 
     @property
-    def callback(self):
+    def callback(self) -> SubscriptionCallback[DeliveryT]:
         return self._callback
 
     @callback.setter
-    def callback(self, value):
+    def callback(self, value: SubscriptionCallback[DeliveryT]) -> None:
         self._callback = value
         self._callback_type = Subscription.CallbackType.MessageOnly
         try:

@@ -40,6 +40,7 @@ all ROS nodes associated with the context), the :func:`shutdown` function should
 This will invalidate all entities derived from the context.
 """
 
+from typing import cast
 from typing import List
 from typing import Optional
 from typing import TYPE_CHECKING
@@ -51,10 +52,10 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.signals import uninstall_signal_handlers
 from rclpy.task import Future
 from rclpy.utilities import get_default_context
-from rclpy.utilities import get_rmw_implementation_identifier  # noqa: F401
-from rclpy.utilities import ok  # noqa: F401 forwarding to this module
+from rclpy.utilities import get_rmw_implementation_identifier as get_rmw_implementation_identifier  # noqa: F401
+from rclpy.utilities import ok as ok  # noqa: F401 forwarding to this module
 from rclpy.utilities import shutdown as _shutdown
-from rclpy.utilities import try_shutdown  # noqa: F401
+from rclpy.utilities import try_shutdown as try_shutdown  # noqa: F401
 
 # Avoid loading extensions on module import
 if TYPE_CHECKING:
@@ -108,7 +109,7 @@ def get_global_executor() -> 'Executor':
 
         def reset_executor():
             global __executor
-            __executor.shutdown()
+            cast('Executor', __executor).shutdown()
             __executor = None
         context.on_shutdown(reset_executor)
     return __executor

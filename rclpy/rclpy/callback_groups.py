@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Literal
 from threading import Lock
 import weakref
 
@@ -29,9 +30,9 @@ class CallbackGroup:
 
     def __init__(self) -> None:
         super().__init__()
-        self.entities: set = set()
+        self.entities: set[weakref.ReferenceType[object]] = set()
 
-    def add_entity(self, entity) -> None:
+    def add_entity(self, entity: object) -> None:
         """
         Add an entity to the callback group.
 
@@ -39,7 +40,7 @@ class CallbackGroup:
         """
         self.entities.add(weakref.ref(entity))
 
-    def has_entity(self, entity) -> bool:
+    def has_entity(self, entity: object) -> bool:
         """
         Determine if an entity has been added to this group.
 
@@ -47,7 +48,7 @@ class CallbackGroup:
         """
         return weakref.ref(entity) in self.entities
 
-    def can_execute(self, entity) -> bool:
+    def can_execute(self, entity: object) -> bool:
         """
         Determine if an entity can be executed.
 
@@ -56,7 +57,7 @@ class CallbackGroup:
         """
         raise NotImplementedError()
 
-    def beginning_execution(self, entity) -> bool:
+    def beginning_execution(self, entity: object) -> bool:
         """
         Get permission for the callback from the group to begin executing an entity.
 
@@ -68,7 +69,7 @@ class CallbackGroup:
         """
         raise NotImplementedError()
 
-    def ending_execution(self, entity) -> None:
+    def ending_execution(self, entity: object) -> None:
         """
         Notify group that a callback has finished executing.
 
@@ -80,30 +81,30 @@ class CallbackGroup:
 class ReentrantCallbackGroup(CallbackGroup):
     """Allow callbacks to be executed in parallel without restriction."""
 
-    def can_execute(self, entity):
+    def can_execute(self, entity: object) -> Literal[True]:
         return True
 
-    def beginning_execution(self, entity):
+    def beginning_execution(self, entity: object) -> Literal[True]:
         return True
 
-    def ending_execution(self, entity):
+    def ending_execution(self, entity: object) -> None:
         pass
 
 
 class MutuallyExclusiveCallbackGroup(CallbackGroup):
     """Allow only one callback to be executing at a time."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self._active_entity = None
+        self._active_entity: object | None = None
         self._lock = Lock()
 
-    def can_execute(self, entity):
+    def can_execute(self, entity: object) -> bool:
         with self._lock:
             assert weakref.ref(entity) in self.entities
             return self._active_entity is None
 
-    def beginning_execution(self, entity):
+    def beginning_execution(self, entity: object) -> bool:
         with self._lock:
             assert weakref.ref(entity) in self.entities
             if self._active_entity is None:
@@ -111,7 +112,7 @@ class MutuallyExclusiveCallbackGroup(CallbackGroup):
                 return True
         return False
 
-    def ending_execution(self, entity):
+    def ending_execution(self, entity: object) -> None:
         with self._lock:
             assert self._active_entity == entity
-            self._active_entity = None
+            self._active_entity: object | None = None

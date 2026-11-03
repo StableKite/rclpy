@@ -13,9 +13,10 @@
 # limitations under the License.
 
 from enum import IntEnum
+from typing import TypedDict, Unpack, cast
 
-from rclpy.qos import QoSHistoryPolicy, QoSPresetProfiles, QoSProfile
-from rclpy.type_hash import TypeHash
+from rclpy.qos import QoSHistoryPolicy, QoSPresetProfiles, QoSProfile, QoSProfileKwargs
+from rclpy.type_hash import TypeHash, TypeHashFields
 
 
 class TopicEndpointTypeEnum(IntEnum):
@@ -28,6 +29,16 @@ class TopicEndpointTypeEnum(IntEnum):
     INVALID = 0
     PUBLISHER = 1
     SUBSCRIPTION = 2
+
+
+class TopicEndpointInfoKwargs(TypedDict, total=False):
+    node_name: str
+    node_namespace: str
+    topic_type: str
+    topic_type_hash: TypeHash | TypeHashFields
+    endpoint_type: int
+    endpoint_gid: list[int]
+    qos_profile: QoSProfile | QoSProfileKwargs
 
 
 class TopicEndpointInfo:
@@ -43,7 +54,7 @@ class TopicEndpointInfo:
         '_qos_profile'
     ]
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Unpack[TopicEndpointInfoKwargs]) -> None:
         assert all('_' + key in self.__slots__ for key in kwargs.keys()), \
             'Invalid arguments passed to constructor: %r' % kwargs.keys()
 
@@ -56,7 +67,7 @@ class TopicEndpointInfo:
         self.qos_profile = kwargs.get('qos_profile', QoSPresetProfiles.UNKNOWN.value)
 
     @property
-    def node_name(self):
+    def node_name(self) -> str:
         """
         Get field 'node_name'.
 
@@ -66,12 +77,12 @@ class TopicEndpointInfo:
         return self._node_name
 
     @node_name.setter
-    def node_name(self, value):
+    def node_name(self, value: str) -> None:
         assert isinstance(value, str)
         self._node_name = value
 
     @property
-    def node_namespace(self):
+    def node_namespace(self) -> str:
         """
         Get field 'node_namespace'.
 
@@ -81,12 +92,12 @@ class TopicEndpointInfo:
         return self._node_namespace
 
     @node_namespace.setter
-    def node_namespace(self, value):
+    def node_namespace(self, value: str) -> None:
         assert isinstance(value, str)
         self._node_namespace = value
 
     @property
-    def topic_type(self):
+    def topic_type(self) -> str:
         """
         Get field 'topic_type'.
 
@@ -96,12 +107,12 @@ class TopicEndpointInfo:
         return self._topic_type
 
     @topic_type.setter
-    def topic_type(self, value):
+    def topic_type(self, value: str) -> None:
         assert isinstance(value, str)
         self._topic_type = value
 
     @property
-    def topic_type_hash(self):
+    def topic_type_hash(self) -> TypeHash:
         """
         Get field 'topic_type_hash'.
 
@@ -111,16 +122,16 @@ class TopicEndpointInfo:
         return self._topic_type_hash
 
     @topic_type_hash.setter
-    def topic_type_hash(self, value):
+    def topic_type_hash(self, value: TypeHash | TypeHashFields) -> None:
         if isinstance(value, TypeHash):
             self._topic_type_hash = value
-        elif isinstance(value, dict):
+        elif isinstance(cast(object, value), dict):
             self._topic_type_hash = TypeHash(**value)
         else:
             assert False
 
     @property
-    def endpoint_type(self):
+    def endpoint_type(self) -> TopicEndpointTypeEnum:
         """
         Get field 'endpoint_type'.
 
@@ -130,16 +141,16 @@ class TopicEndpointInfo:
         return self._endpoint_type
 
     @endpoint_type.setter
-    def endpoint_type(self, value):
+    def endpoint_type(self, value: int) -> None:
         if isinstance(value, TopicEndpointTypeEnum):
             self._endpoint_type = value
-        elif isinstance(value, int):
+        elif isinstance(cast(object, value), int):
             self._endpoint_type = TopicEndpointTypeEnum(value)
         else:
             assert False
 
     @property
-    def endpoint_gid(self):
+    def endpoint_gid(self) -> list[int]:
         """
         Get field 'endpoint_gid'.
 
@@ -149,12 +160,12 @@ class TopicEndpointInfo:
         return self._endpoint_gid
 
     @endpoint_gid.setter
-    def endpoint_gid(self, value):
-        assert all(isinstance(x, int) for x in value)
+    def endpoint_gid(self, value: list[int]) -> None:
+        assert all(isinstance(cast(object, x), int) for x in value)
         self._endpoint_gid = value
 
     @property
-    def qos_profile(self):
+    def qos_profile(self) -> QoSProfile:
         """
         Get field 'qos_profile'.
 
@@ -164,22 +175,22 @@ class TopicEndpointInfo:
         return self._qos_profile
 
     @qos_profile.setter
-    def qos_profile(self, value):
+    def qos_profile(self, value: QoSProfile | QoSProfileKwargs) -> None:
         if isinstance(value, QoSProfile):
             self._qos_profile = value
-        elif isinstance(value, dict):
+        elif isinstance(cast(object, value), dict):
             self._qos_profile = QoSProfile(**value)
         else:
             assert False
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, TopicEndpointInfo):
             return False
         return all(
             self.__getattribute__(slot) == other.__getattribute__(slot)
             for slot in self.__slots__)
 
-    def __str__(self):
+    def __str__(self) -> str:
         gid = '.'.join(format(x, '02x') for x in self.endpoint_gid)
         if self.qos_profile.history.value != QoSHistoryPolicy.KEEP_LAST:
             history_depth_str = self.qos_profile.history.name
