@@ -26,6 +26,7 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rcl_interfaces.msg import SetParametersResult
 
 import rclpy.qos
+from rclpy import python_types
 from rclpy.duration import Duration
 from rclpy.exceptions import ParameterAlreadyDeclaredException
 from rclpy.parameter import Parameter
@@ -40,7 +41,6 @@ from rclpy.subscription import Subscription
 
 if TYPE_CHECKING:
     from typing import TypeAlias
-    from rclpy.node import Node
 
 
 class InvalidQosOverridesError(Exception):
@@ -106,7 +106,7 @@ class QoSOverridingOptions:
 
 def _declare_qos_parameters(
     entity_type: Union[Type[Publisher], Type[Subscription]],
-    node: 'Node',
+    node: 'python_types.Node',
     topic_name: Text,
     qos: QoSProfile,
     options: QoSOverridingOptions

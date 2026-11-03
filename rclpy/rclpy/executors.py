@@ -35,12 +35,12 @@ from typing import Optional
 from typing import Set
 from typing import Tuple
 from typing import Type
-from typing import TYPE_CHECKING
 from typing import TypeVar, ParamSpec, TypeVarTuple, Unpack, cast, overload
 from typing import Union
 
 import warnings
 
+from rclpy import python_types
 from rclpy.callback_groups import CallbackGroup
 from rclpy.client import Client
 from rclpy.clock import Clock
@@ -63,15 +63,12 @@ from rclpy.waitable import Waitable
 WaitableEntityType = Union[Subscription, Timer, Client, Service, GuardCondition, Waitable]
 _EntityT = TypeVar('_EntityT', bound=WaitableEntityType)
 _WaitableDataT = TypeVar('_WaitableDataT')
-_ReadyCallback = Tuple[Task[object], Optional[WaitableEntityType], Optional['Node']]
+_ReadyCallback = Tuple[Task[object], Optional[WaitableEntityType], Optional['python_types.Node']]
 _ReadyCallbackIterator = Generator[_ReadyCallback, None, None]
 _ResultT = TypeVar('_ResultT')
 _Params = ParamSpec('_Params')
 _Args = TypeVarTuple('_Args')
 
-# Avoid import cycle
-if TYPE_CHECKING:
-    from rclpy.node import Node  # noqa: F401
 
 
 class _WorkTracker:
@@ -249,7 +246,7 @@ class TimeoutObject:
 
 @dataclass
 class TaskData:
-    source_node: 'Optional[Node]' = None
+    source_node: 'Optional[python_types.Node]' = None
     source_entity: 'Optional[WaitableEntityType]' = None
 
 
@@ -280,7 +277,7 @@ class Executor(ContextManager['Executor']):
     def __init__(self, *, context: Optional[Context] = None) -> None:
         super().__init__()
         self._context = get_default_context() if context is None else context
-        self._nodes: Set[Node] = set()
+        self._nodes: Set[python_types.Node] = set()
         self._nodes_lock = RLock()
         # all tasks that are not complete or canceled
         self._pending_tasks: Dict[Task, TaskData] = {}
@@ -454,7 +451,7 @@ class Executor(ContextManager['Executor']):
         if guard is not None:
             guard.destroy()
 
-    def add_node(self, node: 'Node') -> bool:
+    def add_node(self, node: 'python_types.Node') -> bool:
         """
         Add a node whose callbacks should be managed by this executor.
 
@@ -470,7 +467,7 @@ class Executor(ContextManager['Executor']):
                 return True
             return False
 
-    def remove_node(self, node: 'Node') -> None:
+    def remove_node(self, node: 'python_types.Node') -> None:
         """
         Stop managing this node's callbacks.
 
@@ -494,7 +491,7 @@ class Executor(ContextManager['Executor']):
         if self._guard:
             self._guard.trigger()
 
-    def get_nodes(self) -> List['Node']:
+    def get_nodes(self) -> List['python_types.Node']:
         """Return nodes that have been added to this executor."""
         with self._nodes_lock:
             return list(self._nodes)
@@ -713,7 +710,7 @@ class Executor(ContextManager['Executor']):
     def _make_handler(
         self,
         entity: _EntityT,
-        node: 'Node',
+        node: 'python_types.Node',
         take_from_wait_list: Callable[[_EntityT], Optional[Callable[[], Coroutine[None, None, None]]]],
     ) -> Task:
         """
@@ -777,7 +774,7 @@ class Executor(ContextManager['Executor']):
     def _wait_for_ready_callbacks(
         self,
         timeout_sec: Optional[Union[float, TimeoutObject]] = None,
-        nodes: Optional[List['Node']] = None,
+        nodes: Optional[List['python_types.Node']] = None,
         condition: Callable[[], bool] = lambda: False,
     ) -> _ReadyCallbackIterator:
         """
@@ -801,7 +798,7 @@ class Executor(ContextManager['Executor']):
         yielded_work = False
         while not yielded_work and not self._is_shutdown and not condition():
             # Refresh "all" nodes in case executor was woken by a node being added or removed
-            nodes_to_use = cast(List['Node'], nodes)
+            nodes_to_use = cast(List['python_types.Node'], nodes)
             if nodes is None:
                 nodes_to_use = self.get_nodes()
 

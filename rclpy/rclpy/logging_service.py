@@ -12,23 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from rcl_interfaces.msg import LoggerLevel, SetLoggerLevelsResult
 from rcl_interfaces.srv import GetLoggerLevels
 from rcl_interfaces.srv import SetLoggerLevels
 import rclpy.logging
+from rclpy import python_types
 from rclpy.impl.logging_severity import LoggingSeverity
 from rclpy.qos import qos_profile_services_default
 from rclpy.validate_topic_name import TOPIC_SEPARATOR_STRING
 
-if TYPE_CHECKING:
-    from rclpy.node import Node
-
 
 class LoggingService:
 
-    def __init__(self, node: 'Node') -> None:
+    def __init__(self, node: 'python_types.Node') -> None:
         node_name = node.get_name()
 
         get_logger_name_service_name = \

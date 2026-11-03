@@ -124,3 +124,56 @@ def test_global_executor_shutdown_and_reinitialization():
         assert second is not first
     finally:
         rclpy.shutdown()
+
+
+def test_python_annotation_alias_body_preserves_lazy_imports():
+    import runpy
+    import sys
+    from rclpy import python_types
+
+    before = {name for name in sys.modules if name == 'rclpy' or name.startswith('rclpy.')}
+    body = runpy.run_path(python_types.__file__)
+    after = {name for name in sys.modules if name == 'rclpy' or name.startswith('rclpy.')}
+    assert after == before
+    assert set(body['__all__']) == {'Node', 'Executor', 'AllowableParameterValue'}
+
+
+def test_python_annotation_aliases_retain_original_type_identity():
+    from rclpy import python_types
+    from rclpy.executors import Executor
+    from rclpy.node import Node
+    from rclpy.parameter import AllowableParameterValue
+
+    assert python_types.Node is Node
+    assert python_types.Executor is Executor
+    assert python_types.AllowableParameterValue is AllowableParameterValue
+    assert set(python_types.__all__) <= set(dir(python_types))
+    with pytest.raises(AttributeError, match='not_a_python_type'):
+        getattr(python_types, 'not_a_python_type')
+
+
+def test_public_cyclic_type_hints_resolve_real_ros_types():
+    from importlib import import_module
+    from typing import get_type_hints
+
+    functions = {
+        'rclpy': ('get_global_executor', 'create_node', 'spin_once', 'spin', 'spin_until_future_complete'),
+        'rclpy.exceptions': ('InvalidParameterValueException.__init__',),
+        'rclpy.executors': ('TaskData.__init__', 'Executor.add_node', 'Executor.remove_node',
+                            'Executor.get_nodes', 'Executor._make_handler',
+                            'Executor._wait_for_ready_callbacks', 'Executor.wait_for_ready_callbacks'),
+        'rclpy.logging_service': ('LoggingService.__init__',),
+        'rclpy.qos_overriding_options': ('_declare_qos_parameters',),
+        'rclpy.time_source': ('TimeSource.__init__', 'TimeSource.attach_node', 'TimeSource._get_node'),
+    }
+    count = 0
+    for module_name, names in functions.items():
+        module = import_module(module_name)
+        for name in names:
+            value = module
+            for attribute in name.split('.'):
+                value = getattr(value, attribute)
+            hints = get_type_hints(value)
+            assert hints, module_name + '.' + name
+            count += 1
+    assert count == 18

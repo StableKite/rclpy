@@ -16,6 +16,7 @@ from typing import Callable, cast, List, Optional, Set, TYPE_CHECKING
 import weakref
 
 from rcl_interfaces.msg import SetParametersResult
+from rclpy import python_types
 from rclpy.clock import ROSClock
 from rclpy.clock_type import ClockType
 from rclpy.parameter import Parameter
@@ -25,7 +26,6 @@ from rclpy.time import Time
 import rosgraph_msgs.msg
 
 if TYPE_CHECKING:
-    from rclpy.node import Node
     from rclpy.subscription import Subscription
 
 CLOCK_TOPIC = '/clock'
@@ -34,9 +34,9 @@ USE_SIM_TIME_NAME = 'use_sim_time'
 
 class TimeSource:
 
-    def __init__(self, *, node: Optional['Node'] = None):
+    def __init__(self, *, node: Optional['python_types.Node'] = None):
         self._clock_sub: Optional['Subscription[rosgraph_msgs.msg.Clock, rosgraph_msgs.msg.Clock]'] = None
-        self._node_weak_ref: Optional[weakref.ReferenceType['Node']] = None
+        self._node_weak_ref: Optional[weakref.ReferenceType['python_types.Node']] = None
         self._associated_clocks: Set[ROSClock] = set()
         # Zero time is a special value that means time is uninitialzied
         self._last_time_set = Time(clock_type=ClockType.ROS_TIME)
@@ -75,7 +75,7 @@ class TimeSource:
                     QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
                 )
 
-    def attach_node(self, node: 'Node') -> None:
+    def attach_node(self, node: 'python_types.Node') -> None:
         from rclpy.node import Node
         if not isinstance(cast(object, node), Node):
             raise TypeError('Node must be of type rclpy.node.Node')
@@ -147,7 +147,7 @@ class TimeSource:
 
         return SetParametersResult(successful=successful, reason=reason)
 
-    def _get_node(self) -> Optional['Node']:
+    def _get_node(self) -> Optional['python_types.Node']:
         if self._node_weak_ref is not None:
             return self._node_weak_ref()
         return None

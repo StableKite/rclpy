@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import cast
-from typing import List, Optional, TYPE_CHECKING, Union
+from typing import List, Optional, Union
 
+from rclpy import python_types
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 
@@ -124,10 +125,7 @@ class InvalidParameterTypeException(ParameterException):
 class InvalidParameterValueException(ParameterException):
     """Raised when a parameter is rejected by a user callback or when applying a descriptor."""
 
-    if TYPE_CHECKING:
-        from rclpy.parameter import AllowableParameterValue
-
-    def __init__(self, parameter: str, value: 'AllowableParameterValue', reason: str) -> None:
+    def __init__(self, parameter: str, value: 'python_types.AllowableParameterValue', reason: str) -> None:
         ParameterException.__init__(
             self,
             'Invalid parameter value ({value}) for parameter. Reason: {reason}'.format(
