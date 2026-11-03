@@ -511,12 +511,16 @@ class Executor(ContextManager['Executor']):
                     now = time.monotonic()
 
                     if now >= end:
-                        self._exit_spin()
-                        return
+                        break
 
                     timeout_left.timeout = end - now
+            # A worker can finish after the last spin and before this loop exits.
+            self._check_completed_tasks()
         finally:
             self._exit_spin()
+
+    def _check_completed_tasks(self) -> None:
+        """Collect worker completions, if this executor dispatches to workers."""
 
     def spin_once(self, timeout_sec: Optional[float] = None) -> None:
         """
@@ -778,6 +782,10 @@ class Executor(ContextManager['Executor']):
                 ready_tasks_count = len(self._ready_tasks)
             for _ in range(ready_tasks_count):
                 task = self._ready_tasks.popleft()
+                # Skip tasks that were cancelled or set done while awaiting a
+                # future and got rescheduled when the future completed
+                if task.cancelled() or task.done():
+                    continue
                 task_data = self._pending_tasks[task]
                 node = task_data.source_node
                 if node is None or node in nodes_to_use:
@@ -1114,13 +1122,16 @@ class MultiThreadedExecutor(Executor):
             pass
         else:
             self._executor.submit(handler)
-            self._futures.append(handler)
-            # make a copy of the list that we iterate over while modifying it
-            # (https://stackoverflow.com/q/1207406/3753684)
-            for future in self._futures[:]:
+            if all(previous is not handler for previous in self._futures):
+                self._futures.append(handler)
+        self._check_completed_tasks()
+
+    def _check_completed_tasks(self) -> None:
+        for future in self._futures[:]:
+            if future.done() or future.cancelled():
+                self._futures.remove(future)
                 if future.done():
-                    self._futures.remove(future)
-                    future.result()  # raise any exceptions
+                    future.result()  # raise the original task exception
 
     def spin_once(self, timeout_sec: Optional[float] = None) -> None:
         # Mark executor as spinning to prevent concurrent spins

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextvars import ContextVar
 from enum import Enum
 import inspect
 import sys
@@ -24,6 +25,13 @@ import weakref
 def _fake_weakref():
     """Return None when called to simulate a weak reference that has been garbage collected."""
     return None
+
+
+class _TaskCancelled(BaseException):
+    """Internal cooperative cancellation at a rclpy Future await checkpoint."""
+
+
+_current_task: ContextVar[Optional['Task']] = ContextVar('rclpy_current_task', default=None)
 
 
 class FutureState(Enum):
@@ -59,12 +67,19 @@ class Future:
                 file=sys.stderr)
 
     def __await__(self) -> Generator['Future', None, Optional[Any]]:
+        task = _current_task.get()
+        if task is not None and task.cancelled():
+            raise _TaskCancelled()
         # Yield if the task is not finished
         if self._pending():
             # This tells the task to suspend until the future is done
             yield self
         if self._pending():
             raise RuntimeError('Future awaited a second time before it was done')
+        # A different worker can cancel the task and complete this Future while
+        # its coroutine is still entering await, so check even without a yield.
+        if task is not None and task.cancelled():
+            raise _TaskCancelled()
         return self.result()
 
     def _pending(self) -> bool:
@@ -76,7 +91,7 @@ class Future:
             if not self._pending():
                 return
 
-        self._state = FutureState.CANCELLED
+            self._state = FutureState.CANCELLED
         self._schedule_or_invoke_done_callbacks()
 
     def cancelled(self):
@@ -157,10 +172,18 @@ class Future:
         if executor is not None:
             # Have the executor take care of the callbacks
             for callback in callbacks:
-                executor.create_task(callback, self)
+                if isinstance(callback, Task):
+                    executor._call_task_in_next_spin(callback)
+                else:
+                    executor.create_task(callback, self)
         else:
             # No executor, call right away
             for callback in callbacks:
+                if isinstance(callback, Task):
+                    warnings.warn(
+                        'Dropping task awaiting future: '
+                        'executor reference could not be resolved')
+                    continue
                 try:
                     callback(self)
                 except Exception as e:
@@ -200,6 +223,28 @@ class Future:
         # Invoke when not holding self._lock
         if invoke:
             callback(self)
+
+    def _add_waiting_task(self, task: 'Task') -> None:
+        """Schedule a task to resume when this future completes."""
+        with self._lock:
+            if not self._pending():
+                executor = self._executor()
+                if executor is not None:
+                    executor._call_task_in_next_spin(task)
+                else:
+                    warnings.warn(
+                        'Dropping task awaiting future: '
+                        'executor reference could not be resolved')
+            else:
+                self._callbacks.append(task)
+
+    def _remove_waiting_task(self, task: 'Task') -> None:
+        """Release this future's cancelled/resumed task without invoking callbacks."""
+        with self._lock:
+            for index, callback in enumerate(self._callbacks):
+                if callback is task:
+                    del self._callbacks[index]
+                    return
 
     def remove_done_callback(self, callback: Callable[['Future'], None]) -> bool:
         """
@@ -244,46 +289,42 @@ class Task(Future):
         # True while the task is being executed
         self._executing = False
         # Lock acquired to prevent task from executing in parallel with itself
-        self._task_lock = threading.Lock()
+        self._task_lock = threading.RLock()
+        # A waiting Future must release its task owner when the task is cancelled.
+        self._waiting_on: Optional[Future] = None
 
     def __call__(self):
-        """
-        Run or resume a task.
-
-        This attempts to execute a handler. If the handler is a coroutine it will attempt to
-        await it. If there are done callbacks it will schedule them with the executor.
-
-        The return value of the handler is stored as the task result.
-        """
-        if (
-            not self._pending() or
-            self._executing or
-            not self._task_lock.acquire(blocking=False)
-        ):
-            return
-        try:
-            if not self._pending():
+        """Run one serialized handler/coroutine step and retain queued resume requests."""
+        # Another worker may receive a ready Future before the yielding worker
+        # has released this task. Wait for that step; do not discard the wakeup.
+        # RLock keeps direct same-thread reentry harmless.
+        with self._task_lock:
+            if not self._pending() or self._executing:
                 return
             self._executing = True
-
-            if inspect.iscoroutine(self._handler):
-                self._execute_coroutine_step(self._handler)
-            else:
-                # Execute a normal function
-                try:
-                    self.set_result(self._handler(*self._args, **self._kwargs))
-                except Exception as e:
-                    self.set_exception(e)
-                self._complete_task()
-
-            self._executing = False
-        finally:
-            self._task_lock.release()
+            token = _current_task.set(self)
+            try:
+                self._clear_waiting_future()
+                if inspect.iscoroutine(self._handler):
+                    self._execute_coroutine_step(self._handler)
+                else:
+                    try:
+                        self.set_result(self._handler(*self._args, **self._kwargs))
+                    except Exception as e:
+                        self.set_exception(e)
+                    self._complete_task()
+            finally:
+                _current_task.reset(token)
+                self._executing = False
+                if self.cancelled():
+                    self._close_cancelled_coroutine()
 
     def _execute_coroutine_step(self, coro: Coroutine) -> None:
         """Execute or resume a coroutine task."""
         try:
             result = coro.send(None)
+        except _TaskCancelled:
+            self._complete_task()
         except StopIteration as e:
             # The coroutine finished; store the result
             self.set_result(e.value)
@@ -317,12 +358,26 @@ class Task(Future):
         elif future_executor is not executor:
             raise RuntimeError('A task can only await futures associated with the same executor')
 
-        # The future is associated with the same executor, so we can resume the task directly
-        # in the done callback
-        future.add_done_callback(lambda _: self.__call__())
+        # Register the task to resume when the future is done or cancelled
+        self._waiting_on = future
+        future._add_waiting_task(self)
+
+    def _clear_waiting_future(self) -> None:
+        future = self._waiting_on
+        self._waiting_on = None
+        if future is not None:
+            future._remove_waiting_task(self)
+
+    def _close_cancelled_coroutine(self) -> None:
+        try:
+            if inspect.iscoroutine(self._handler):
+                self._handler.close()
+        finally:
+            self._complete_task()
 
     def _complete_task(self) -> None:
         """Cleanup after task finished."""
+        self._clear_waiting_future()
         self._handler = None
         self._args = None
         self._kwargs = None
@@ -347,9 +402,17 @@ class Task(Future):
         return self._executing
 
     def cancel(self) -> None:
-        if self._pending() and inspect.iscoroutine(self._handler):
-            self._handler.close()
-
         super().cancel()
-        if self.cancelled():
+        if not self.cancelled():
+            return
+        try:
+            # Cancellation is a request: never wait for a running user handler.
+            # The active worker closes a suspended coroutine in its finally block.
+            if self._task_lock.acquire(blocking=False):
+                try:
+                    if not self._executing:
+                        self._close_cancelled_coroutine()
+                finally:
+                    self._task_lock.release()
+        finally:
             self._notify_executor_task_done()

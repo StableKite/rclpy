@@ -420,6 +420,197 @@ class TestExecutor(unittest.TestCase):
                 self.assertTrue(future1.done())
                 self.assertEqual('Sentinel Result 1', future1.result())
 
+    def test_coroutine_exception_after_await(self) -> None:
+        """Exception in a coroutine after awaiting a future must propagate."""
+        self.assertIsNotNone(self.node.handle)
+        executor_types = [
+            SingleThreadedExecutor, MultiThreadedExecutor, EventsExecutor,
+        ]
+        for cls in executor_types:
+            with self.subTest(cls=cls):
+                executor = cls(context=self.context)
+                executor.add_node(self.node)
+
+                first_fut = executor.create_future()
+                second_fut = executor.create_future()
+
+                async def coro_that_raises() -> None:
+                    first_fut.set_result(None)
+                    await second_fut
+                    raise RuntimeError('Expected error after await')
+
+                task = executor.create_task(coro_that_raises)
+
+                executor.spin_until_future_complete(first_fut, timeout_sec=5)
+                self.assertFalse(task.done())
+                # Resolve the inner future — triggers resume
+                second_fut.set_result(None)
+
+                with self.assertRaises(RuntimeError) as cm:
+                    executor.spin_until_future_complete(task, timeout_sec=5)
+                self.assertIn('Expected error after await', str(cm.exception))
+
+
+    def test_cancel_task_while_awaiting_future(self) -> None:
+        """Cancelling a task parked on a future must not crash the dispatch loop."""
+        self.assertIsNotNone(self.node.handle)
+        executor_types = [
+            SingleThreadedExecutor, MultiThreadedExecutor, EventsExecutor,
+        ]
+        for cls in executor_types:
+            with self.subTest(cls=cls):
+                executor = cls(context=self.context)
+                executor.add_node(self.node)
+
+                first_fut = executor.create_future()
+                second_fut = executor.create_future()
+                third_fut = executor.create_future()
+
+                async def coro() -> None:
+                    first_fut.set_result(None)
+                    await second_fut
+                    third_fut.set_result(None)
+
+                task = executor.create_task(coro)
+
+                executor.spin_until_future_complete(first_fut, timeout_sec=5)
+                self.assertFalse(task.done())
+
+                task.cancel()
+                self.assertTrue(task.cancelled())
+
+                second_fut.set_result(None)
+
+                executor.spin_until_future_complete(first_fut, timeout_sec=5)
+                self.assertFalse(third_fut.done())
+
+
+    def test_await_already_completed_future(self) -> None:
+        """Awaiting an already-completed future must resume and return its result."""
+        self.assertIsNotNone(self.node.handle)
+        executor_types = [
+            SingleThreadedExecutor, MultiThreadedExecutor, EventsExecutor,
+        ]
+        for cls in executor_types:
+            with self.subTest(cls=cls):
+                executor = cls(context=self.context)
+                executor.add_node(self.node)
+
+                fut: Future = executor.create_future()
+                fut.set_result('done')  # complete before the task runs
+
+                async def coro() -> str | None:
+                    return await fut
+
+                task = executor.create_task(coro)
+
+                executor.spin_until_future_complete(task, timeout_sec=5)
+                self.assertTrue(task.done())
+                self.assertEqual('done', task.result())
+
+
+    def test_task_cancel_while_coroutine_step_is_active(self) -> None:
+        for cls in (SingleThreadedExecutor, MultiThreadedExecutor, EventsExecutor):
+            with self.subTest(cls=cls):
+                executor = cls(context=self.context)
+                entered = threading.Event()
+                release = threading.Event()
+                closed = threading.Event()
+                reached_after_await = threading.Event()
+                awaited = executor.create_future()
+                errors = []
+
+                async def coro() -> None:
+                    try:
+                        entered.set()
+                        self.assertTrue(release.wait(5))
+                        await awaited
+                        reached_after_await.set()
+                    finally:
+                        closed.set()
+
+                task = executor.create_task(coro)
+
+                def run_step() -> None:
+                    try:
+                        task()
+                    except BaseException as error:
+                        errors.append(error)
+
+                worker = threading.Thread(target=run_step)
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(5))
+                    task.cancel()
+                    self.assertTrue(task.cancelled())
+                    # Complete before the blocked coroutine can enter await.
+                    awaited.set_result(None)
+                finally:
+                    release.set()
+                    worker.join(5)
+                    self.assertFalse(worker.is_alive())
+                    task.cancel()
+                    self.assertTrue(executor.shutdown(timeout_sec=5))
+                self.assertFalse(errors)
+                self.assertTrue(closed.is_set())
+                self.assertFalse(reached_after_await.is_set())
+
+    def test_self_cancelled_event_task_releases_future_owner(self) -> None:
+        executor = EventsExecutor(context=self.context)
+        awaited = executor.create_future()
+        reached_after_await = False
+
+        async def coro() -> None:
+            nonlocal reached_after_await
+            task.cancel()
+            await awaited
+            reached_after_await = True
+
+        task = executor.create_task(coro)
+        observer = weakref.ref(task)
+        try:
+            executor.spin_once(timeout_sec=5)
+            self.assertTrue(task.cancelled())
+            self.assertFalse(reached_after_await)
+            task = None
+            gc.collect()
+            self.assertIsNone(observer())
+            self.assertFalse(awaited.done())
+        finally:
+            self.assertTrue(executor.shutdown(timeout_sec=5))
+
+    def test_multithreaded_task_error_completed_at_spin_return(self) -> None:
+        release = threading.Event()
+        wait_tick = threading.Event()
+        original = RuntimeError('worker error completed before spin return')
+
+        class ControlledExecutor(MultiThreadedExecutor):
+            def _spin_once_impl(inner_self, *args, **kwargs):
+                super()._spin_once_impl(*args, **kwargs)
+                # The dispatch/collection pass ends while the worker is held.
+                # Complete it before spin_until_future_complete checks its target.
+                release.set()
+                deadline = time.monotonic() + 5
+                while not task.done():
+                    self.assertLess(time.monotonic(), deadline)
+                    wait_tick.wait(0.001)
+
+        executor = ControlledExecutor(num_threads=2, context=self.context)
+
+        def failing_task() -> None:
+            self.assertTrue(release.wait(5))
+            raise original
+
+        task = executor.create_task(failing_task)
+        try:
+            with self.assertRaises(RuntimeError) as caught:
+                executor.spin_until_future_complete(task, timeout_sec=5)
+            self.assertIs(caught.exception, original)
+        finally:
+            release.set()
+            self.assertTrue(executor.shutdown(timeout_sec=5))
+            task.exception()
+
     def test_create_task_during_spin(self):
         self.assertIsNotNone(self.node.handle)
         for cls in [SingleThreadedExecutor, EventsExecutor]:
