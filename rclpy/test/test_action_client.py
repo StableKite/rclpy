@@ -93,6 +93,26 @@ class TestActionClient(unittest.TestCase):
         while (time.time() - start_time) < duration:
             rclpy.spin_once(self.node, executor=self.executor, timeout_sec=0.1)
 
+    def test_empty_native_service_responses(self):
+        # A fresh client has no goal/cancel/result responses. Exercise the actual
+        # TAKE_FAILED branch and retain its exact public (None, None) contract.
+        client = ActionClient(self.node, Fibonacci, 'empty_native_responses')
+        try:
+            with client:
+                native = client._client_handle
+                for _ in range(64):
+                    self.assertEqual(
+                        native.take_goal_response(Fibonacci.Impl.SendGoalService.Response),
+                        (None, None))
+                    self.assertEqual(
+                        native.take_cancel_response(Fibonacci.Impl.CancelGoalService.Response),
+                        (None, None))
+                    self.assertEqual(
+                        native.take_result_response(Fibonacci.Impl.GetResultService.Response),
+                        (None, None))
+        finally:
+            client.destroy()
+
     def test_constructor_defaults(self):
         # Defaults
         ac = ActionClient(self.node, Fibonacci, 'fibonacci')

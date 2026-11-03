@@ -109,13 +109,13 @@ ActionClient::ActionClient(
   rmw_request_id_t header; \
   rcl_ret_t ret = rcl_action_take_ ## Type ## _response( \
     rcl_action_client_.get(), &header, taken_msg.get()); \
-  int64_t sequence = header.sequence_number; \
   /* Create the tuple to return */ \
   if (RCL_RET_ACTION_CLIENT_TAKE_FAILED == ret || RCL_RET_ACTION_SERVER_TAKE_FAILED == ret) { \
     return py::make_tuple(py::none(), py::none()); \
   } else if (RCL_RET_OK != ret) { \
     throw rclpy::RCLError("Failed to take " #Type); \
   } \
+  const int64_t sequence = header.sequence_number; \
   return py::make_tuple(sequence, convert_to_py(taken_msg.get(), pymsg_type)); \
 
 py::tuple
