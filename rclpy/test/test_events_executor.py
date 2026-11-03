@@ -665,3 +665,152 @@ class TestEventsExecutor(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_real_node_addition_during_entity_snapshot():
+    from threading import Event, Thread
+
+    entered, release = Event(), Event()
+
+    class PausedSubscriptionNode(rclpy.node.Node):
+        @property
+        def subscriptions(self):
+            # Keep the actual Node property values and order two valid calls.
+            entered.set()
+            assert release.wait(10)
+            yield from super().subscriptions
+
+    context = rclpy.context.Context()
+    context.init(args=[])
+    executor = rclpy.experimental.EventsExecutor(context=context)
+    first = PausedSubscriptionNode('snapshot_first', context=context,
+        start_parameter_services=False, enable_rosout=False)
+    second = rclpy.node.Node('snapshot_second', context=context,
+        start_parameter_services=False, enable_rosout=False)
+    errors = []
+
+    def spin():
+        try:
+            executor.spin_once(timeout_sec=0.1)
+        except BaseException as error:
+            errors.append(error)
+
+    thread = Thread(target=spin, name='owned-node-snapshot-spin')
+    try:
+        assert executor.add_node(first)
+        thread.start()
+        assert entered.wait(10)
+        assert executor.add_node(second)
+        release.set()
+        thread.join(10)
+        assert not thread.is_alive()
+        assert not errors
+        assert set(executor.get_nodes()) == {first, second}
+        executor.spin_once(timeout_sec=0.01)
+    finally:
+        release.set()
+        if thread.ident is not None:
+            thread.join(10)
+        assert not thread.is_alive()
+        assert executor.shutdown(timeout_sec=2)
+        first.destroy_node()
+        second.destroy_node()
+        context.shutdown()
+
+
+def test_concurrent_real_node_membership_has_one_successful_add():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    context = rclpy.context.Context()
+    context.init(args=[])
+    executor = rclpy.experimental.EventsExecutor(context=context)
+    node = rclpy.node.Node('membership_real_node', context=context,
+        start_parameter_services=False, enable_rosout=False)
+    workers = 8
+
+    def add(barrier):
+        barrier.wait(timeout=10)
+        return executor.add_node(node)
+
+    def remove(barrier):
+        barrier.wait(timeout=10)
+        executor.remove_node(node)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for _ in range(256):
+                barrier = Barrier(workers)
+                futures = [pool.submit(add, barrier) for _ in range(workers)]
+                assert sum(future.result(timeout=15) for future in futures) == 1
+                assert executor.get_nodes() == [node]
+                barrier = Barrier(workers)
+                futures = [pool.submit(remove, barrier) for _ in range(workers)]
+                for future in futures:
+                    future.result(timeout=15)
+                assert executor.get_nodes() == []
+    finally:
+        assert executor.shutdown(timeout_sec=2)
+        node.destroy_node()
+        context.shutdown()
+
+
+def test_real_callback_cycles_collect_before_and_after_spin():
+    import gc
+    import weakref
+
+    for factory in (rclpy.executors.SingleThreadedExecutor, rclpy.experimental.EventsExecutor):
+        for entity in ('timer', 'action'):
+            for spinning in (False, True):
+                context = rclpy.context.Context()
+                context.init(args=[])
+
+                def make_cycle():
+                    executor = factory(context=context)
+                    node = rclpy.node.Node('executor_cycle', context=context,
+                        start_parameter_services=False, enable_rosout=False)
+                    if entity == 'timer':
+                        def callback():
+                            return executor.get_nodes()
+                        owner = node.create_timer(60, callback)
+                    else:
+                        def execute(goal):
+                            executor.get_nodes()
+                            return test_msgs.action.Fibonacci.Result(sequence=[])
+                        owner = rclpy.action.ActionServer(node, test_msgs.action.Fibonacci,
+                            'executor_cycle_action', execute_callback=execute)
+                    assert executor.add_node(node)
+                    if spinning:
+                        executor.spin_once(timeout_sec=0.001)
+                    return tuple(weakref.ref(value) for value in (executor, node, owner))
+
+                references = make_cycle()
+                try:
+                    for _ in range(3):
+                        gc.collect()
+                    assert all(reference() is None for reference in references), (
+                        factory, entity, spinning, [reference() is not None for reference in references])
+                finally:
+                    # Failed cases retain strong live owners during ordinary cleanup.
+                    executor, node, owner = (reference() for reference in references)
+                    if executor is not None:
+                        assert executor.shutdown(timeout_sec=2)
+                    if node is not None:
+                        node.destroy_node()
+                    del executor, node, owner
+                    context.shutdown()
+
+
+def test_gc_traversal_tolerates_a_not_yet_initialized_executor():
+    import gc
+    import weakref
+    from rclpy.impl.implementation_singleton import rclpy_implementation
+
+    cls = rclpy_implementation.EventsExecutor
+    value = cls.__new__(cls)
+    reference = weakref.ref(value)
+    gc.collect()
+    del value
+    for _ in range(3):
+        gc.collect()
+    assert reference() is None

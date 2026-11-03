@@ -41,6 +41,13 @@ public:
   ScopedWith(const ScopedWith &) = delete;
   ScopedWith & operator=(const ScopedWith &) = delete;
 
+  /// Called only by cyclic GC while attached Python mutators are stopped.
+  int TraversePythonOwner(visitproc visit, void * arg) const
+  {
+    Py_VISIT(object_.ptr());
+    return 0;
+  }
+
   ~ScopedWith() noexcept
   {
 #if PY_VERSION_HEX >= 0x030D0000

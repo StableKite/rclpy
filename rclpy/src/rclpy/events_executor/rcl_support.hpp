@@ -59,6 +59,9 @@ public:
   /// MakeCallback().  Caution: ensure that RCL is no longer using a callback before invoking this.
   void RemoveCallback(const void * key);
 
+  /// Visit each distinct Python context owner while attached mutators are stopped.
+  int TraversePythonOwners(visitproc visit, void * arg) const;
+
 private:
   // A queued event belongs to one registration, even if the RCL entity address
   // is subsequently reused. Taking an invocation also leases its native owner

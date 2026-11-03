@@ -81,6 +81,9 @@ public:
   EventsExecutor * enter();
   void exit(pybind11::object, pybind11::object, pybind11::object);
 
+  /// Visit native-held Python references without running Python or taking locks.
+  int TraversePythonOwners(visitproc visit, void * arg) const;
+
 private:
   // Structure to hold entities discovered underlying a Waitable object.
   struct WaitableSubEntities
@@ -94,7 +97,7 @@ private:
 
   /// Updates the sets of known entities based on the currently tracked nodes.  This is not thread
   /// safe, so it must be posted to the EventsQueue if the executor is currently spinning.  Expects
-  /// the GIL to be held before calling.  If @p shutdown is true, a purge of all known nodes and
+  /// an attached Python thread before calling. If @p shutdown is true, a purge of all known nodes and
   /// entities is forced.
   void UpdateEntitiesFromNodes(bool shutdown);
 
@@ -173,6 +176,7 @@ private:
   ScopedSignalCallback signal_callback_;
 
   pybind11::set nodes_;                ///< The set of all nodes we're executing
+  const pybind11::object nodes_lock_;  ///< Serializes membership and snapshot creation
   std::atomic<bool> wake_pending_{};   ///< An unhandled call to wake() has been made
   std::timed_mutex spinning_mutex_;    ///< Held while a thread is spinning
   std::mutex task_owners_mutex_;       ///< Serializes identity-key registration and completion

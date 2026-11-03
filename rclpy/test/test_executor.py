@@ -1499,3 +1499,48 @@ class TestExecutor(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_concurrent_node_transfers_leave_one_matching_executor():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from rclpy.context import Context
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.experimental import EventsExecutor
+    from rclpy.node import Node
+
+    for factories in ((EventsExecutor, EventsExecutor),
+                      (SingleThreadedExecutor, EventsExecutor),
+                      (SingleThreadedExecutor, SingleThreadedExecutor)):
+        context = Context()
+        context.init(args=[])
+        executors = [factory(context=context) for factory in factories]
+
+        def add(executor, node, barrier):
+            barrier.wait(timeout=10)
+            return executor.add_node(node)
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                for index in range(256):
+                    node = Node('transfer_' + str(index), context=context,
+                        start_parameter_services=False, enable_rosout=False)
+                    try:
+                        barrier = Barrier(2)
+                        futures = [pool.submit(add, executor, node, barrier)
+                                   for executor in executors]
+                        for future in futures:
+                            assert isinstance(future.result(timeout=15), bool)
+                        membership = [node in executor.get_nodes() for executor in executors]
+                        owner = node.executor
+                        assert sum(membership) == 1
+                        assert membership == [owner is executor for executor in executors]
+                    finally:
+                        node.executor = None
+                        for executor in executors:
+                            executor.remove_node(node)
+                        node.destroy_node()
+        finally:
+            for executor in executors:
+                assert executor.shutdown(timeout_sec=2)
+            context.shutdown()

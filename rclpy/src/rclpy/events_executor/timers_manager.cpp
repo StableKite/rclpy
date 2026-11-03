@@ -437,6 +437,17 @@ void TimersManager::AddTimer(py::handle timer)
   timer_mappings_[timer] = std::move(mapping);
 }
 
+int TimersManager::TraversePythonOwners(visitproc visit, void * arg) const
+{
+  for (const auto & entry : timer_mappings_) {
+    const int result = entry.second.with->TraversePythonOwner(visit, arg);
+    if (result != 0) {
+      return result;
+    }
+  }
+  return 0;
+}
+
 void TimersManager::RemoveTimer(py::handle timer)
 {
   const auto it = timer_mappings_.find(timer);

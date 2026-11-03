@@ -72,6 +72,9 @@ public:
   void AddTimer(pybind11::handle timer);
   void RemoveTimer(pybind11::handle timer);
 
+  /// Visit each distinct native timer-handle owner during cyclic GC.
+  int TraversePythonOwners(visitproc visit, void * arg) const;
+
 private:
   struct PyRclMapping
   {

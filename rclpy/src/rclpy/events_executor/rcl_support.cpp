@@ -84,6 +84,38 @@ const void * RclCallbackManager::MakeCallback(
   return ret;
 }
 
+int RclCallbackManager::TraversePythonOwners(visitproc visit, void * arg) const
+{
+  // Registration and retirement happen on the attached executor thread. GC
+  // stops that thread; middleware only enqueues work. Do not acquire a Python
+  // or native registry lock from tp_traverse while mutators are stopped.
+  for (auto current = owned_cbs_.cbegin(); current != owned_cbs_.cend(); ++current) {
+    const auto * invocation = current->second.state->invocation.get();
+    if (!invocation || !invocation->with) {
+      continue;
+    }
+    const auto * owner = invocation->with.get();
+    bool already_visited = false;
+    // One waitable can share its ScopedWith across multiple registrations.
+    // It owns one Python reference, so visit that reference exactly once.
+    // This allocation-free walk also keeps tp_traverse free of allocation.
+    for (auto previous = owned_cbs_.cbegin(); previous != current; ++previous) {
+      const auto * earlier = previous->second.state->invocation.get();
+      if (earlier && earlier->with.get() == owner) {
+        already_visited = true;
+        break;
+      }
+    }
+    if (!already_visited) {
+      const int result = owner->TraversePythonOwner(visit, arg);
+      if (result != 0) {
+        return result;
+      }
+    }
+  }
+  return 0;
+}
+
 void RclCallbackManager::RemoveCallback(const void * key)
 {
   CbEntry removed;

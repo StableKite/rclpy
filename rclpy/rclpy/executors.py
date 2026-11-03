@@ -459,13 +459,15 @@ class Executor(ContextManager['Executor']):
         :return: ``True`` if the node was added, ``False`` otherwise.
         """
         with self._nodes_lock:
-            if node not in self._nodes:
-                self._nodes.add(node)
-                node.executor = self
-                # Rebuild the wait set so it includes this new node
-                cast(GuardCondition, self._guard).trigger()
-                return True
-            return False
+            if node in self._nodes:
+                return False
+            self._nodes.add(node)
+        # The Node setter serializes transfers and may enter another executor.
+        # Never hold this executor's registry lock while acquiring that lock.
+        node.executor = self
+        # Rebuild the wait set so it includes this new node
+        cast(GuardCondition, self._guard).trigger()
+        return True
 
     def remove_node(self, node: 'python_types.Node') -> None:
         """

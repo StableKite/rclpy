@@ -26,6 +26,7 @@ from typing import TypeVar, Coroutine, Literal, TypedDict, cast, overload
 from typing import Union
 
 import warnings
+from threading import RLock
 import weakref
 
 from rcl_interfaces.msg import FloatingPointRange
@@ -221,6 +222,7 @@ class Node:
         with self.handle:
             self._logger = get_logger(self.__node.logger_name())
 
+        self._executor_lock = RLock()
         self.__executor_weakref: weakref.ReferenceType[Executor] | None = None
 
         self._parameter_event_publisher = self.create_publisher(
@@ -297,23 +299,25 @@ class Node:
     @property
     def executor(self) -> Optional[Executor]:
         """Get the executor if the node has been added to one, else return ``None``."""
-        if self.__executor_weakref:
-            return self.__executor_weakref()
-        return None
+        executor_ref = self.__executor_weakref
+        return executor_ref() if executor_ref is not None else None
 
     @executor.setter
     def executor(self, new_executor: Optional[Executor]) -> None:
         """Set or change the executor the node belongs to."""
-        current_executor = self.executor
-        if current_executor == new_executor:
-            return
-        if current_executor is not None:
-            current_executor.remove_node(self)
-        if new_executor is None:
-            self.__executor_weakref = None
-        else:
-            new_executor.add_node(self)
-            self.__executor_weakref = weakref.ref(new_executor)
+        # A transfer spans two executor registries and this weak reference.
+        # Reentrant add_node() callbacks must observe one serialized transfer.
+        with self._executor_lock:
+            current_executor = self.executor
+            if current_executor == new_executor:
+                return
+            if current_executor is not None:
+                current_executor.remove_node(self)
+            if new_executor is None:
+                self.__executor_weakref = None
+            else:
+                new_executor.add_node(self)
+                self.__executor_weakref = weakref.ref(new_executor)
 
     def _wake_executor(self) -> None:
         executor = self.executor

@@ -56,6 +56,7 @@ EventsExecutor::EventsExecutor(py::object context)
   rclpy_task_(py::module_::import("rclpy.task").attr("Task")),
   rclpy_future_(py::module_::import("rclpy.task").attr("Future")),
   signal_callback_([this]() {events_queue_.Stop();}),
+  nodes_lock_(py::module_::import("threading").attr("RLock")()),
   rcl_callback_manager_(&events_queue_),
   timers_manager_(
     &events_queue_, std::bind(&EventsExecutor::HandleTimerReady, this, pl::_1))
@@ -153,7 +154,7 @@ bool EventsExecutor::shutdown(std::optional<double> timeout)
   }
 
   // Tear down any callbacks we still have registered.
-  for (py::handle node : py::list(nodes_)) {
+  for (py::handle node : get_nodes()) {
     remove_node(node);
   }
   UpdateEntitiesFromNodes(true);
@@ -162,10 +163,15 @@ bool EventsExecutor::shutdown(std::optional<double> timeout)
 
 bool EventsExecutor::add_node(py::object node)
 {
-  if (nodes_.contains(node)) {
-    return false;
+  {
+    ScopedWith lock(nodes_lock_);
+    if (nodes_.contains(node)) {
+      return false;
+    }
+    nodes_.add(node);
   }
-  nodes_.add(node);
+  // Release the registry lock before the Python setter, including transfers
+  // from other executors. Holding two executor locks here can deadlock.
   // Caution, the Node executor setter method calls executor.add_node() again making this
   // reentrant.
   node.attr("executor") = py::cast(this);
@@ -175,11 +181,14 @@ bool EventsExecutor::add_node(py::object node)
 
 void EventsExecutor::remove_node(py::handle node)
 {
-  if (!nodes_.contains(node)) {
-    return;
+  {
+    ScopedWith lock(nodes_lock_);
+    if (!nodes_.contains(node)) {
+      return;
+    }
+    // Why does pybind11 provide add() but not discard() or remove()?
+    nodes_.attr("remove")(node);
   }
-  // Why does pybind11 provide a C++ method for add() but not discard() or remove()?
-  nodes_.attr("remove")(node);
   // Not sure why rclpy doesn't change the node.executor at this point
   wake();
 }
@@ -195,7 +204,11 @@ void EventsExecutor::wake()
   }
 }
 
-py::list EventsExecutor::get_nodes() const {return nodes_;}
+py::list EventsExecutor::get_nodes() const
+{
+  ScopedWith lock(nodes_lock_);
+  return py::list(nodes_);
+}
 
 // NOTE: The timeouts on the below two methods are always realtime even if we're running in debug
 // time.  This is true of other executors too, because debug time is always associated with a
@@ -259,8 +272,11 @@ void EventsExecutor::UpdateEntitiesFromNodes(bool shutdown)
   py::set clients;
   py::set services;
   py::set waitables;
+  py::set retired_nodes;
   if (!shutdown) {
-    for (py::handle node : nodes_) {
+    // The snapshot retains its nodes while their real properties are queried.
+    // No registry lock is held while calling Python or updating native callbacks.
+    for (py::handle node : get_nodes()) {
       subscriptions.attr("update")(py::set(node.attr("subscriptions")));
       timers.attr("update")(py::set(node.attr("timers")));
       clients.attr("update")(py::set(node.attr("clients")));
@@ -275,7 +291,8 @@ void EventsExecutor::UpdateEntitiesFromNodes(bool shutdown)
     }
   } else {
     // Remove all tracked entities and nodes.
-    nodes_.clear();
+    ScopedWith lock(nodes_lock_);
+    std::swap(nodes_, retired_nodes);
   }
 
   // Perform updates for added and removed entities
@@ -856,7 +873,7 @@ void EventsExecutor::HandleCallbackExceptionInNodeEntity(
 {
   // Try to identify the node associated with the entity that threw the exception, so we can log to
   // it.
-  for (py::handle node : nodes_) {
+  for (py::handle node : get_nodes()) {
     if (py::set(node.attr(node_entity_attr.c_str())).contains(entity)) {
       return HandleCallbackExceptionWithLogger(exc, node.attr("get_logger")(), node_entity_attr);
     }
@@ -899,11 +916,74 @@ void EventsExecutor::Raise(py::object ex)
   py::exec("raise ex", scope);
 }
 
+int EventsExecutor::TraversePythonOwners(visitproc visit, void * arg) const
+{
+  Py_VISIT(rclpy_context_.ptr());
+  Py_VISIT(inspect_iscoroutine_.ptr());
+  Py_VISIT(inspect_signature_.ptr());
+  Py_VISIT(rclpy_task_.ptr());
+  Py_VISIT(rclpy_future_.ptr());
+  Py_VISIT(nodes_.ptr());
+  Py_VISIT(nodes_lock_.ptr());
+  Py_VISIT(subscriptions_.ptr());
+  Py_VISIT(timers_.ptr());
+  Py_VISIT(clients_.ptr());
+  Py_VISIT(services_.ptr());
+  Py_VISIT(waitables_.ptr());
+  const int result = timers_manager_.TraversePythonOwners(visit, arg);
+  return result != 0 ? result : rcl_callback_manager_.TraversePythonOwners(visit, arg);
+}
+
+// Retire SDK callbacks in tp_finalize, before cyclic GC clears any Node/Timer
+// dictionaries. Keep the original exception indicator across finalization.
+static void FinalizeEventsExecutor(PyObject * self)
+{
+  if (!py::detail::is_holder_constructed(self)) {
+    return;
+  }
+  PyObject * type = nullptr;
+  PyObject * value = nullptr;
+  PyObject * traceback = nullptr;
+  PyErr_Fetch(&type, &value, &traceback);
+  try {
+    py::cast<EventsExecutor &>(py::handle(self)).shutdown();
+  } catch (py::error_already_set & error) {
+    error.discard_as_unraisable("EventsExecutor finalization");
+  } catch (const std::exception & error) {
+    PyErr_SetString(PyExc_RuntimeError, error.what());
+    PyErr_WriteUnraisable(self);
+  } catch (...) {
+    PyErr_SetString(PyExc_RuntimeError, "Unknown executor finalization exception");
+    PyErr_WriteUnraisable(self);
+  }
+  PyErr_Restore(type, value, traceback);
+}
+
 // pybind11 module bindings
 
 void define_events_executor(py::object module)
 {
-  py::class_<EventsExecutor>(module, "EventsExecutor", py::dynamic_attr())
+  py::class_<EventsExecutor>(
+    module, "EventsExecutor", py::dynamic_attr(),
+    py::custom_type_setup([](PyHeapTypeObject * heap_type) {
+      auto * type = &heap_type->ht_type;
+      type->tp_traverse = [](PyObject * self, visitproc visit, void * arg) {
+          const int result = py::detail::pybind11_traverse(self, visit, arg);
+          if (result != 0 || !py::detail::is_holder_constructed(self)) {
+            return result;
+          }
+          return py::cast<EventsExecutor &>(py::handle(self)).TraversePythonOwners(visit, arg);
+        };
+      type->tp_finalize = FinalizeEventsExecutor;
+      type->tp_dealloc = [](PyObject * self) {
+          // Finalize before pybind11 clears its managed instance dictionary.
+          // Respect CPython's resurrection result and original deallocation.
+          if (PyObject_CallFinalizerFromDealloc(self) < 0) {
+            return;
+          }
+          py::detail::pybind11_object_dealloc(self);
+        };
+    }))
   .def(py::init<py::object>(), py::arg("context"))
   .def_property_readonly("context", &EventsExecutor::get_context)
   .def("create_task", &EventsExecutor::create_task, py::arg("callback"))
