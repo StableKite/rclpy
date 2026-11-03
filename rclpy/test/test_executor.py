@@ -1048,6 +1048,26 @@ class TestExecutor(unittest.TestCase):
         finally:
             executor.shutdown(timeout_sec=5)
 
+    def test_task_exception_preserves_original_with_one_node(self) -> None:
+        for node_count in (0, 1):
+            with self.subTest(node_count=node_count):
+                executor = EventsExecutor(context=self.context)
+                original = ValueError('preserve task exception identity')
+
+                def failing_task() -> None:
+                    raise original
+
+                if node_count:
+                    self.assertTrue(executor.add_node(self.node))
+                task = executor.create_task(failing_task)
+                try:
+                    with self.assertRaises(ValueError) as caught:
+                        executor.spin_once(timeout_sec=5)
+                    self.assertIs(caught.exception, original)
+                    self.assertIs(task.exception(), original)
+                finally:
+                    self.assertTrue(executor.shutdown(timeout_sec=5))
+
     def test_context_manager(self):
         self.assertIsNotNone(self.node.handle)
 
