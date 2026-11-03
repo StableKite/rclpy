@@ -18,6 +18,9 @@
 
 #include <pybind11/pybind11.h>
 
+#include <exception>
+#include <utility>
+
 namespace rclpy
 {
 namespace events_executor
@@ -28,12 +31,56 @@ class ScopedWith
 {
 public:
   explicit ScopedWith(pybind11::handle object)
-  : object_(pybind11::cast<pybind11::object>(object))
   {
-    object_.attr("__enter__")();
+    pybind11::gil_scoped_acquire attached;
+    auto owner = pybind11::reinterpret_borrow<pybind11::object>(object);
+    owner.attr("__enter__")();
+    object_ = std::move(owner);
   }
 
-  ~ScopedWith() {object_.attr("__exit__")(pybind11::none(), pybind11::none(), pybind11::none());}
+  ScopedWith(const ScopedWith &) = delete;
+  ScopedWith & operator=(const ScopedWith &) = delete;
+
+  /// Called only by cyclic GC while attached Python mutators are stopped.
+  int TraversePythonOwner(visitproc visit, void * arg) const
+  {
+    Py_VISIT(object_.ptr());
+    return 0;
+  }
+
+  ~ScopedWith() noexcept
+  {
+#if PY_VERSION_HEX >= 0x030D0000
+    const bool thread_attached = PyThreadState_GetUnchecked() != nullptr;
+    const bool finalizing = Py_IsFinalizing() != 0;
+#else
+    const bool thread_attached = PyGILState_Check() != 0;
+    const bool finalizing = _Py_IsFinalizing() != 0;
+#endif
+    if (!thread_attached && (!Py_IsInitialized() || finalizing)) {
+      // A foreign thread cannot reattach during interpreter shutdown. As with
+      // other finalization-time Python owners, leave this reference to process
+      // teardown instead of invoking Python after its runtime has stopped.
+      (void)object_.release();
+      return;
+    }
+    pybind11::gil_scoped_acquire attached;
+    PyObject * type = nullptr;
+    PyObject * value = nullptr;
+    PyObject * traceback = nullptr;
+    PyErr_Fetch(&type, &value, &traceback);
+    try {
+      object_.attr("__exit__")(pybind11::none(), pybind11::none(), pybind11::none());
+    } catch (pybind11::error_already_set & error) {
+      error.discard_as_unraisable(object_);
+    } catch (const std::exception & error) {
+      PyErr_SetString(PyExc_RuntimeError, error.what());
+      PyErr_WriteUnraisable(object_.ptr());
+    }
+    // DECREF can run Python cleanup too, so clear the member while attached.
+    object_ = pybind11::object();
+    PyErr_Restore(type, value, traceback);
+  }
 
 private:
   pybind11::object object_;

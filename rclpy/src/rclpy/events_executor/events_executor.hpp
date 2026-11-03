@@ -67,6 +67,7 @@ public:
   pybind11::object create_task(
     pybind11::object callback, pybind11::args args = {}, const pybind11::kwargs & kwargs = {});
   void call_task_in_next_spin(pybind11::handle task);
+  void on_task_done(pybind11::handle task);
   pybind11::object create_future();
   bool shutdown(std::optional<double> timeout_sec = {});
   bool add_node(pybind11::object node);
@@ -79,6 +80,9 @@ public:
     bool stop_after_user_callback = false);
   EventsExecutor * enter();
   void exit(pybind11::object, pybind11::object, pybind11::object);
+
+  /// Visit native-held Python references without running Python or taking locks.
+  int TraversePythonOwners(visitproc visit, void * arg) const;
 
 private:
   // Structure to hold entities discovered underlying a Waitable object.
@@ -93,7 +97,7 @@ private:
 
   /// Updates the sets of known entities based on the currently tracked nodes.  This is not thread
   /// safe, so it must be posted to the EventsQueue if the executor is currently spinning.  Expects
-  /// the GIL to be held before calling.  If @p shutdown is true, a purge of all known nodes and
+  /// an attached Python thread before calling. If @p shutdown is true, a purge of all known nodes and
   /// entities is forced.
   void UpdateEntitiesFromNodes(bool shutdown);
 
@@ -145,8 +149,10 @@ private:
   void HandleWaitableReady(
     pybind11::handle waitable, std::shared_ptr<rclpy::WaitSet> wait_set, size_t number_of_events);
 
-  /// Helper for create_task().  @p task needs to have had one reference manually added to it.  See
-  /// create_task() implementation for details.
+  /// GC-visible task owners live on the Python instance, including callback cycles.
+  pybind11::dict TaskOwners();
+
+  /// Helper for create_task(); the caller retains an owner for this dispatch.
   void IterateTask(pybind11::handle task);
 
   void HandleCallbackExceptionInNodeEntity(
@@ -170,8 +176,10 @@ private:
   ScopedSignalCallback signal_callback_;
 
   pybind11::set nodes_;                ///< The set of all nodes we're executing
+  const pybind11::object nodes_lock_;  ///< Serializes membership and snapshot creation
   std::atomic<bool> wake_pending_{};   ///< An unhandled call to wake() has been made
   std::timed_mutex spinning_mutex_;    ///< Held while a thread is spinning
+  std::mutex task_owners_mutex_;       ///< Serializes identity-key registration and completion
 
   /// This flag is used by spin_once() to signal that the EventsQueue should be stopped after a
   /// single user-visible callback has been dispatched.
@@ -186,7 +194,8 @@ private:
 
   /// Cache for rcl pointers underlying each waitables_ entry, because those are harder to retrieve
   /// than the other entity types.
-  std::unordered_map<pybind11::handle, WaitableSubEntities, PythonHasher> waitable_entities_;
+  std::unordered_map<pybind11::handle, WaitableSubEntities, PythonHasher, PythonIdentityEqual>
+  waitable_entities_;
 
   RclCallbackManager rcl_callback_manager_;
   TimersManager timers_manager_;

@@ -20,15 +20,58 @@
 #include <rcl/time.h>
 
 #include <memory>
+#include <functional>
 
 #include "destroyable.hpp"
 #include "exceptions.hpp"
-#include "utils.hpp"
 
 namespace py = pybind11;
 
 namespace rclpy
 {
+class ClockState;
+class NativeClockCallbackState;
+
+/// A native jump registration sharing the binding clock's mutation/lifetime guard.
+class ClockJumpCallback
+{
+public:
+  ~ClockJumpCallback() noexcept;
+  ClockJumpCallback(const ClockJumpCallback &) = delete;
+  ClockJumpCallback & operator=(const ClockJumpCallback &) = delete;
+
+private:
+  friend class Clock;
+  ClockJumpCallback(
+    std::shared_ptr<ClockState> state, rcl_jump_threshold_t threshold,
+    std::function<void(const rcl_time_jump_t *)> callback);
+
+  std::shared_ptr<ClockState> state_;
+  std::shared_ptr<NativeClockCallbackState> callback_;
+};
+
+/// Own a native clock while serializing mutations that invoke Python callbacks.
+class ClockMutation
+{
+public:
+  explicit ClockMutation(std::shared_ptr<ClockState> state, bool cleanup = false);
+  ClockMutation(const ClockMutation &) = delete;
+  ClockMutation & operator=(const ClockMutation &) = delete;
+  ~ClockMutation() noexcept;
+
+  rcl_clock_t * rcl_ptr() const;
+  void track_timer(const std::shared_ptr<void> & owner);
+
+private:
+  friend class Clock;
+  // Attach before touching Python references. RLock waits cooperate with the
+  // Python runtime; no C++ mutex is held while invoking user jump callbacks.
+  py::gil_scoped_acquire attached_;
+  std::shared_ptr<ClockState> state_;
+  py::object release_;
+  bool locked_ = false;
+};
+
 class Clock : public Destroyable, public std::enable_shared_from_this<Clock>
 {
 public:
@@ -40,6 +83,7 @@ public:
    * This constructor creates a Clock object
    */
   explicit Clock(int clock_type);
+  Clock(const Clock & other);
 
   /// Returns the current value of the clock
   /**
@@ -103,17 +147,31 @@ public:
   void
   remove_clock_callback(py::object pyjump_handle);
 
+  /// Complete the Python JumpHandle unregister transaction under this clock's guard.
+  void unregister_clock_callback(py::object pyjump_handle);
+
   /// Get rcl_clock_t pointer
-  rcl_clock_t * rcl_ptr() const
-  {
-    return rcl_clock_.get();
-  }
+  rcl_clock_t * rcl_ptr() const;
+
+  /// Keep the native allocation alive independently of a closing Python owner.
+  std::shared_ptr<rcl_clock_t> rcl_handle() const;
+
+  /// Timer initialization/finalization also mutate this clock's callback array.
+  ClockMutation mutation() const;
+
+  /// Register against a binding-owned clock, deferring SDK array changes during a jump.
+  /// An unknown native clock returns no registration; its native caller retains
+  /// the SDK's existing clock lifetime and serialization responsibilities.
+  static std::unique_ptr<ClockJumpCallback> create_native_jump_callback(
+    rcl_clock_t * clock, rcl_jump_threshold_t threshold,
+    std::function<void(const rcl_time_jump_t *)> callback);
 
   /// Force an early destruction of this object
   void destroy() override;
 
 private:
-  std::shared_ptr<rcl_clock_t> rcl_clock_;
+  friend class TimerState;
+  std::shared_ptr<ClockState> state_;
 };
 
 /// Define a pybind11 wrapper for an rclpy::Clock

@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import List, Optional, TYPE_CHECKING, Union
+from typing import cast
+from typing import List, Optional, Union
 
+from rclpy import python_types
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 
@@ -110,12 +112,12 @@ class InvalidParameterTypeException(ParameterException):
 
     from rclpy.parameter import Parameter
 
-    def __init__(self, desired_parameter: Parameter, expected_type: Parameter.Type) -> None:
+    def __init__(self, desired_parameter: Parameter, expected_type: str | Parameter.Type) -> None:
         from rclpy.parameter import Parameter
         ParameterException.__init__(
             self,
-            f"Trying to set parameter '{desired_parameter._name}' to '{desired_parameter._value}'"
-            f" of type '{Parameter.Type.from_parameter_value(desired_parameter._value).name}'"
+            f"Trying to set parameter '{cast(str, getattr(desired_parameter, "_name"))}' to '{cast(object, getattr(desired_parameter, "_value"))}'"
+            f" of type '{Parameter.Type.from_parameter_value(cast(object, getattr(desired_parameter, "_value"))).name}'"
             f", expecting type '{expected_type}'",
             desired_parameter.name)
 
@@ -123,10 +125,7 @@ class InvalidParameterTypeException(ParameterException):
 class InvalidParameterValueException(ParameterException):
     """Raised when a parameter is rejected by a user callback or when applying a descriptor."""
 
-    if TYPE_CHECKING:
-        from rclpy.parameter import AllowableParameterValue
-
-    def __init__(self, parameter: str, value: 'AllowableParameterValue', reason: str) -> None:
+    def __init__(self, parameter: str, value: 'python_types.AllowableParameterValue', reason: str) -> None:
         ParameterException.__init__(
             self,
             'Invalid parameter value ({value}) for parameter. Reason: {reason}'.format(

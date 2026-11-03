@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from rclpy.context import Context
 from rclpy.exceptions import InvalidHandle
 from rclpy.guard_condition import GuardCondition
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
@@ -21,7 +22,7 @@ from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 SignalHandlerOptions = _rclpy.SignalHandlerOptions
 
 
-def install_signal_handlers(options: SignalHandlerOptions = SignalHandlerOptions.ALL):
+def install_signal_handlers(options: SignalHandlerOptions=SignalHandlerOptions.ALL) -> None:
     """
     Install rclpy signal handlers.
 
@@ -30,7 +31,7 @@ def install_signal_handlers(options: SignalHandlerOptions = SignalHandlerOptions
     return _rclpy.install_signal_handlers(options)
 
 
-def get_current_signal_handlers_options():
+def get_current_signal_handlers_options() -> SignalHandlerOptions:
     """
     Get current signal handler options.
 
@@ -39,19 +40,19 @@ def get_current_signal_handlers_options():
     return _rclpy.get_current_signal_handlers_options()
 
 
-def uninstall_signal_handlers():
+def uninstall_signal_handlers() -> None:
     """Uninstall the rclpy signal handlers."""
     _rclpy.uninstall_signal_handlers()
 
 
 class SignalHandlerGuardCondition(GuardCondition):
 
-    def __init__(self, context=None):
+    def __init__(self, context: Context | None = None) -> None:
         super().__init__(callback=None, callback_group=None, context=context)
         with self.handle:
             _rclpy.register_sigint_guard_condition(self.handle)
 
-    def __del__(self):
+    def __del__(self) -> None:
         try:
             self.destroy()
         except InvalidHandle:
@@ -61,7 +62,15 @@ class SignalHandlerGuardCondition(GuardCondition):
             # Guard condition was not registered
             pass
 
-    def destroy(self):
-        with self.handle:
-            _rclpy.unregister_sigint_guard_condition(self.handle)
+    def destroy(self) -> None:
+        try:
+            with self.handle:
+                _rclpy.unregister_sigint_guard_condition(self.handle)
+        except InvalidHandle:
+            # Another cleanup path already requested native destruction.
+            return
+        except ValueError:
+            # Unregister may already have completed; still release the native
+            # guard instead of leaving it alive until Python collection.
+            pass
         super().destroy()

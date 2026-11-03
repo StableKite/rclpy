@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Protocol, Union
+from typing import Protocol, Union, cast
 
 import builtin_interfaces.msg
+from rclpy import native_types
 from rclpy.constants import S_TO_NS
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
@@ -41,7 +42,7 @@ class Duration:
             # pybind11 would raise TypeError, but we want OverflowError
             raise OverflowError(
                 'Total nanoseconds value is too large to store in C duration.')
-        self._duration_handle: DurationType = _rclpy.rcl_duration_t(total_nanoseconds)
+        self._duration_handle: native_types.rcl_duration_t = _rclpy.rcl_duration_t(total_nanoseconds)
 
     @property
     def nanoseconds(self) -> int:
@@ -102,11 +103,11 @@ class Duration:
 
         :param msg: An instance of :class:`builtin_interfaces.msg.Duration`.
         """
-        if not isinstance(msg, builtin_interfaces.msg.Duration):
+        if not isinstance(cast(object, msg), builtin_interfaces.msg.Duration):
             raise TypeError('Must pass a builtin_interfaces.msg.Duration object')
         return cls(seconds=msg.sec, nanoseconds=msg.nanosec)
 
-    def get_c_duration(self) -> DurationType:
+    def get_c_duration(self) -> native_types.rcl_duration_t:
         return self._duration_handle
 
 

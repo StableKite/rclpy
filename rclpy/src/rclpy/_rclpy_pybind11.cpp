@@ -57,7 +57,7 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(_rclpy_pybind11, m) {
+PYBIND11_MODULE(_rclpy_pybind11, m, py::mod_gil_not_used()) {
   m.doc() = "ROS 2 Python client library.";
 
   rclpy::define_destroyable(m);

@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import TypeVar
+
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.type_support import check_for_type_support
 
 
-def serialize_message(message) -> bytes:
+_MessageT = TypeVar('_MessageT')
+
+
+def serialize_message(message: object) -> bytes:
     """
     Serialize a ROS message.
 
@@ -29,7 +34,7 @@ def serialize_message(message) -> bytes:
     return _rclpy.rclpy_serialize(message, message_type)
 
 
-def deserialize_message(serialized_message: bytes, message_type):
+def deserialize_message(serialized_message: bytes, message_type: type[_MessageT]) -> _MessageT:
     """
     Deserialize a ROS message.
 

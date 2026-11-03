@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TypeVar, Union
+from typing import Generic, TypeVar, Union, cast
 
 from rclpy.callback_groups import CallbackGroup
 from rclpy.duration import Duration
@@ -21,15 +21,15 @@ from rclpy.event_handler import PublisherEventCallbacks
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 from rclpy.qos import QoSProfile
 
-MsgType = TypeVar('MsgType')
+MsgType = TypeVar('MsgType', default=object)
 
 
-class Publisher:
+class Publisher(Generic[MsgType]):
 
     def __init__(
         self,
         publisher_impl: _rclpy.Publisher,
-        msg_type: MsgType,
+        msg_type: type[MsgType],
         topic: str,
         qos_profile: QoSProfile,
         event_callbacks: PublisherEventCallbacks,
@@ -54,7 +54,7 @@ class Publisher:
         self.topic = topic
         self.qos_profile = qos_profile
 
-        self.event_handlers: EventHandler = event_callbacks.create_event_handlers(
+        self.event_handlers: list[EventHandler] = event_callbacks.create_event_handlers(
             callback_group, publisher_impl, topic)
 
     def publish(self, msg: Union[MsgType, bytes]) -> None:
@@ -84,7 +84,7 @@ class Publisher:
             return self.__publisher.get_topic_name()
 
     @property
-    def handle(self):
+    def handle(self) -> _rclpy.Publisher:
         return self.__publisher
 
     @property
@@ -93,7 +93,7 @@ class Publisher:
         with self.handle:
             return self.__publisher.get_logger_name()
 
-    def destroy(self):
+    def destroy(self) -> None:
         """
         Destroy a container for a ROS publisher.
 
@@ -132,4 +132,4 @@ class Publisher:
             false.
         """
         with self.handle:
-            return self.__publisher.wait_for_all_acked(timeout._duration_handle)
+            return self.__publisher.wait_for_all_acked(cast(_rclpy.rcl_duration_t, getattr(timeout, "_duration_handle")))

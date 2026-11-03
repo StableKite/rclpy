@@ -18,13 +18,14 @@
 #include <pybind11/pybind11.h>
 
 #include <mutex>
-
-#include "context.hpp"
+#include <optional>
 
 namespace py = pybind11;
 
 namespace rclpy
 {
+class Context;
+
 /// Acquire the global logging mutex when constructed, and release it when destructed
 class LoggingGuard
 {
@@ -33,7 +34,10 @@ public:
 
 private:
   static std::recursive_mutex logging_mutex_;
-  std::lock_guard<std::recursive_mutex> guard_;
+  // Destroy the native guard before reattaching Python state. All code under
+  // this guard must use native APIs only, including error construction.
+  std::optional<py::gil_scoped_release> release_;
+  std::unique_lock<std::recursive_mutex> guard_;
 };
 
 /// Initialize rcl logging

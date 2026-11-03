@@ -24,7 +24,7 @@ class ClockType(IntEnum):
     This enum must match the one defined in rclpy/_rclpy_pybind11.cpp.
     """
 
-    UNINITIALIZED = _rclpy.ClockType.UNINITIALIZED
-    ROS_TIME = _rclpy.ClockType.ROS_TIME
-    SYSTEM_TIME = _rclpy.ClockType.SYSTEM_TIME
-    STEADY_TIME = _rclpy.ClockType.STEADY_TIME
+    UNINITIALIZED = int(_rclpy.ClockType.UNINITIALIZED)
+    ROS_TIME = int(_rclpy.ClockType.ROS_TIME)
+    SYSTEM_TIME = int(_rclpy.ClockType.SYSTEM_TIME)
+    STEADY_TIME = int(_rclpy.ClockType.STEADY_TIME)

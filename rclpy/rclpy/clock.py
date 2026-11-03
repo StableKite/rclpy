@@ -14,8 +14,9 @@
 
 from enum import IntEnum
 from types import TracebackType
-from typing import Callable, Optional, Protocol, Type, TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Callable, Optional, Protocol, Type, TypedDict, cast
 
+from rclpy import native_types
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 from .clock_type import ClockType
@@ -26,16 +27,15 @@ from .exceptions import NotInitializedException
 from .time import Time, TimeHandle
 from .utilities import get_default_context
 
-
 if TYPE_CHECKING:
     from typing import TypeAlias
 
 
 class ClockChange(IntEnum):
-    ROS_TIME_NO_CHANGE = _rclpy.ClockChange.ROS_TIME_NO_CHANGE
-    ROS_TIME_ACTIVATED = _rclpy.ClockChange.ROS_TIME_ACTIVATED
-    ROS_TIME_DEACTIVATED = _rclpy.ClockChange.ROS_TIME_DEACTIVATED
-    SYSTEM_TIME_NO_CHANGE = _rclpy.ClockChange.SYSTEM_TIME_NO_CHANGE
+    ROS_TIME_NO_CHANGE = int(_rclpy.ClockChange.ROS_TIME_NO_CHANGE)
+    ROS_TIME_ACTIVATED = int(_rclpy.ClockChange.ROS_TIME_ACTIVATED)
+    ROS_TIME_DEACTIVATED = int(_rclpy.ClockChange.ROS_TIME_DEACTIVATED)
+    SYSTEM_TIME_NO_CHANGE = int(_rclpy.ClockChange.SYSTEM_TIME_NO_CHANGE)
 
 
 class JumpThreshold:
@@ -71,14 +71,14 @@ class JumpThreshold:
 
 class TimeJump:
 
-    def __init__(self, clock_change: ClockChange, delta: Duration):
-        if not isinstance(clock_change, (ClockChange, _rclpy.ClockChange)):
+    def __init__(self, clock_change: ClockChange | _rclpy.ClockChange, delta: Duration):
+        if not isinstance(cast(object, clock_change), (ClockChange, _rclpy.ClockChange)):
             raise TypeError('clock_change must be an instance of rclpy.clock.ClockChange')
         self._clock_change = clock_change
         self._delta = delta
 
     @property
-    def clock_change(self) -> ClockChange:
+    def clock_change(self) -> ClockChange | _rclpy.ClockChange:
         return self._clock_change
 
     @property
@@ -92,6 +92,13 @@ class TimeJumpDictionary(TypedDict):
 
 
 JumpHandlePreCallbackType: 'TypeAlias' = Callable[[], None]
+
+
+def _require_time(value: object) -> Time:
+    if not isinstance(value, Time):
+        raise TypeError(
+            'Time must be specified as rclpy.time.Time. Received type: {0}'.format(type(value)))
+    return value
 
 
 class JumpHandle:
@@ -132,10 +139,10 @@ class JumpHandle:
 
     def unregister(self) -> None:
         """Remove a jump callback from the clock."""
-        if self._clock is not None:
-            with self._clock.handle:
-                self._clock.handle.remove_clock_callback(self)
-            self._clock = None
+        clock = self._clock
+        if clock is not None:
+            with clock.handle:
+                clock.handle.unregister_clock_callback(self)
 
     def __enter__(self) -> 'JumpHandle':
         return self
@@ -174,19 +181,23 @@ class ClockHandle(DestroyableType, Protocol):
         """Remove a time jump callback from a clock."""
         ...
 
+    def unregister_clock_callback(self, pyjump_handle: JumpHandle) -> None:
+        """Remove a Python jump handle and clear its owner atomically."""
+        ...
+
 
 class Clock:
 
     if TYPE_CHECKING:
-        __clock: ClockHandle
-        _clock_type: ClockType
+        __clock: native_types.Clock
+        _clock_type: ClockType | _rclpy.ClockType
 
     def __new__(cls, *,
-                clock_type: ClockType = ClockType.SYSTEM_TIME) -> 'Clock':
-        if not isinstance(clock_type, (ClockType, _rclpy.ClockType)):
+                clock_type: ClockType | _rclpy.ClockType = ClockType.SYSTEM_TIME) -> 'Clock':
+        if not isinstance(cast(object, clock_type), (ClockType, _rclpy.ClockType)):
             raise TypeError('Clock type must be a ClockType enum')
         if clock_type is ClockType.ROS_TIME:
-            self: 'Clock' = super().__new__(ROSClock)
+            self: 'Clock' = object.__new__(ROSClock)
         else:
             self = super().__new__(cls)
         self.__clock = _rclpy.Clock(clock_type)
@@ -194,11 +205,11 @@ class Clock:
         return self
 
     @property
-    def clock_type(self) -> ClockType:
+    def clock_type(self) -> ClockType | _rclpy.ClockType:
         return self._clock_type
 
     @property
-    def handle(self) -> ClockHandle:
+    def handle(self) -> native_types.Clock:
         """
         Return the internal instance of ``rclpy::Clock``.
 
@@ -300,11 +311,11 @@ class Clock:
             on_clock_change=True)
         with self.create_jump_callback(threshold, post_callback=on_time_jump):
             if ClockType.SYSTEM_TIME == self._clock_type:
-                event.wait_until_system(self.__clock, until._time_handle)
+                event.wait_until_system(self.__clock, until.handle)
             elif ClockType.STEADY_TIME == self._clock_type:
-                event.wait_until_steady(self.__clock, until._time_handle)
+                event.wait_until_steady(self.__clock, until.handle)
             elif ClockType.ROS_TIME == self._clock_type:
-                event.wait_until_ros(self.__clock, until._time_handle)
+                event.wait_until_ros(self.__clock, until.handle)
 
         if not context.ok() or time_source_changed:
             return False
@@ -340,7 +351,7 @@ class Clock:
 class ROSClock(Clock):
 
     def __new__(cls) -> 'ROSClock':
-        self = super().__new__(Clock, clock_type=ClockType.ROS_TIME)
+        self = super().__new__(cls, clock_type=ClockType.ROS_TIME)
         assert isinstance(self, ROSClock)
         return self
 
@@ -357,8 +368,6 @@ class ROSClock(Clock):
 
     def set_ros_time_override(self, time: Time) -> None:
         """Set the next time the ROS clock will report when ROS time is active."""
-        if not isinstance(time, Time):
-            raise TypeError(
-                'Time must be specified as rclpy.time.Time. Received type: {0}'.format(type(time)))
+        time = _require_time(time)
         with self.handle:
-            self.handle.set_ros_time_override(time._time_handle)
+            self.handle.set_ros_time_override(time.handle)

@@ -40,10 +40,11 @@ all ROS nodes associated with the context), the :func:`shutdown` function should
 This will invalidate all entities derived from the context.
 """
 
+from typing import cast
 from typing import List
 from typing import Optional
-from typing import TYPE_CHECKING
 
+from rclpy import python_types
 from rclpy.context import Context
 from rclpy.parameter import Parameter
 from rclpy.signals import install_signal_handlers
@@ -51,15 +52,11 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.signals import uninstall_signal_handlers
 from rclpy.task import Future
 from rclpy.utilities import get_default_context
-from rclpy.utilities import get_rmw_implementation_identifier  # noqa: F401
-from rclpy.utilities import ok  # noqa: F401 forwarding to this module
+from rclpy.utilities import get_rmw_implementation_identifier as get_rmw_implementation_identifier  # noqa: F401
+from rclpy.utilities import ok as ok  # noqa: F401 forwarding to this module
 from rclpy.utilities import shutdown as _shutdown
-from rclpy.utilities import try_shutdown  # noqa: F401
+from rclpy.utilities import try_shutdown as try_shutdown  # noqa: F401
 
-# Avoid loading extensions on module import
-if TYPE_CHECKING:
-    from rclpy.executors import Executor  # noqa: F401
-    from rclpy.node import Node  # noqa: F401
 
 
 def init(
@@ -98,7 +95,7 @@ def init(
 __executor = None
 
 
-def get_global_executor() -> 'Executor':
+def get_global_executor() -> 'python_types.Executor':
     global __executor
     if __executor is None:
         # imported locally to avoid loading extensions on module import
@@ -108,7 +105,7 @@ def get_global_executor() -> 'Executor':
 
         def reset_executor():
             global __executor
-            __executor.shutdown()
+            cast('python_types.Executor', __executor).shutdown()
             __executor = None
         context.on_shutdown(reset_executor)
     return __executor
@@ -153,7 +150,7 @@ def create_node(
     allow_undeclared_parameters: bool = False,
     automatically_declare_parameters_from_overrides: bool = False,
     enable_logger_service: bool = False
-) -> 'Node':
+) -> 'python_types.Node':
     """
     Create an instance of :class:`.Node`.
 
@@ -196,9 +193,9 @@ def create_node(
 
 
 def spin_once(
-    node: 'Node',
+    node: 'python_types.Node',
     *,
-    executor: Optional['Executor'] = None,
+    executor: Optional['python_types.Executor'] = None,
     timeout_sec: Optional[float] = None
 ) -> None:
     """
@@ -229,7 +226,7 @@ def spin_once(
             executor.remove_node(node)
 
 
-def spin(node: 'Node', executor: Optional['Executor'] = None) -> None:
+def spin(node: 'python_types.Node', executor: Optional['python_types.Executor'] = None) -> None:
     """
     Execute work and block until the context associated with the executor is shutdown.
 
@@ -250,9 +247,9 @@ def spin(node: 'Node', executor: Optional['Executor'] = None) -> None:
 
 
 def spin_until_future_complete(
-    node: 'Node',
+    node: 'python_types.Node',
     future: Future,
-    executor: Optional['Executor'] = None,
+    executor: Optional['python_types.Executor'] = None,
     timeout_sec: Optional[float] = None
 ) -> None:
     """

@@ -38,6 +38,13 @@ private:
   std::shared_ptr<Impl> impl_;
 };
 
+namespace detail
+{
+/// Invoke registered native callbacks from the deferred dispatcher.
+/// This is not an asynchronous OS signal handler and is not exposed to Python.
+void invoke_signal_callbacks();
+}  // namespace detail
+
 /// Define methods on a module for working with signal handlers
 /**
  * \param[in] module a pybind11 module to add the definition to

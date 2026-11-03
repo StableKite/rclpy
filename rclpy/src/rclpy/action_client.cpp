@@ -24,6 +24,7 @@
 #include <memory>
 #include <string>
 
+#include "cleanup_warning.hpp"
 #include "action_client.hpp"
 #include "exceptions.hpp"
 #include "node.hpp"
@@ -71,11 +72,8 @@ ActionClient::ActionClient(
       // Intentionally capture node by value so shared_ptr can be transferred to copies
       rcl_ret_t ret = rcl_action_client_fini(action_client, node.rcl_ptr());
       if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini publisher: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "action client", rcl_get_error_string().str);
         rcl_reset_error();
       }
       delete action_client;
@@ -111,13 +109,13 @@ ActionClient::ActionClient(
   rmw_request_id_t header; \
   rcl_ret_t ret = rcl_action_take_ ## Type ## _response( \
     rcl_action_client_.get(), &header, taken_msg.get()); \
-  int64_t sequence = header.sequence_number; \
   /* Create the tuple to return */ \
   if (RCL_RET_ACTION_CLIENT_TAKE_FAILED == ret || RCL_RET_ACTION_SERVER_TAKE_FAILED == ret) { \
     return py::make_tuple(py::none(), py::none()); \
   } else if (RCL_RET_OK != ret) { \
     throw rclpy::RCLError("Failed to take " #Type); \
   } \
+  const int64_t sequence = header.sequence_number; \
   return py::make_tuple(sequence, convert_to_py(taken_msg.get(), pymsg_type)); \
 
 py::tuple

@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import array
+from types import GenericAlias
 from enum import Enum
-from typing import Dict
+from typing import Callable, Dict, Iterable, Self, TextIO, cast
 from typing import List
 from typing import Optional
 from typing import Tuple
@@ -25,6 +26,7 @@ from rcl_interfaces.msg import Parameter as ParameterMsg
 from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.msg import ParameterValue
 import yaml
+import yaml.parser
 
 PARAMETER_SEPARATOR_STRING = '.'
 
@@ -35,6 +37,8 @@ if TYPE_CHECKING:
                                     List[int], Tuple[int, ...], array.array[int],
                                     List[float], Tuple[float, ...], array.array[float],
                                     List[str], Tuple[str, ...], array.array[str]]
+else:
+    AllowableParameterValue = Union[None, bool, int, float, str, List[bytes], Tuple[bytes, ...], List[bool], Tuple[bool, ...], List[int], Tuple[int, ...], GenericAlias(array.array, int), List[float], Tuple[float, ...], GenericAlias(array.array, float), List[str], Tuple[str, ...], GenericAlias(array.array, str)]
 
 
 class Parameter:
@@ -52,7 +56,7 @@ class Parameter:
         STRING_ARRAY = ParameterType.PARAMETER_STRING_ARRAY
 
         @classmethod
-        def from_parameter_value(cls, parameter_value):
+        def from_parameter_value(cls, parameter_value: object) -> Parameter.Type:
             """
             Get a Parameter.Type from a given variable.
 
@@ -70,15 +74,15 @@ class Parameter:
             elif isinstance(parameter_value, str):
                 return Parameter.Type.STRING
             elif isinstance(parameter_value, (list, tuple, array.array)):
-                if all(isinstance(v, bytes) for v in parameter_value):
+                if all(isinstance(v, bytes) for v in cast(Iterable[object], parameter_value)):
                     return Parameter.Type.BYTE_ARRAY
-                elif all(isinstance(v, bool) for v in parameter_value):
+                elif all(isinstance(v, bool) for v in cast(Iterable[object], parameter_value)):
                     return Parameter.Type.BOOL_ARRAY
-                elif all(isinstance(v, int) for v in parameter_value):
+                elif all(isinstance(v, int) for v in cast(Iterable[object], parameter_value)):
                     return Parameter.Type.INTEGER_ARRAY
-                elif all(isinstance(v, float) for v in parameter_value):
+                elif all(isinstance(v, float) for v in cast(Iterable[object], parameter_value)):
                     return Parameter.Type.DOUBLE_ARRAY
-                elif all(isinstance(v, str) for v in parameter_value):
+                elif all(isinstance(v, str) for v in cast(Iterable[object], parameter_value)):
                     return Parameter.Type.STRING_ARRAY
                 else:
                     raise TypeError(
@@ -88,7 +92,7 @@ class Parameter:
                 raise TypeError(
                     f"The given value is not one of the allowed types '{parameter_value}'.")
 
-        def check(self, parameter_value):
+        def check(self, parameter_value: object) -> bool:
             if Parameter.Type.NOT_SET == self:
                 return parameter_value is None
             if Parameter.Type.BOOL == self:
@@ -101,24 +105,24 @@ class Parameter:
                 return isinstance(parameter_value, str)
             if Parameter.Type.BYTE_ARRAY == self:
                 return isinstance(parameter_value, (list, tuple)) and \
-                    all(isinstance(v, bytes) and len(v) == 1 for v in parameter_value)
+                    all(isinstance(v, bytes) and len(v) == 1 for v in cast(Iterable[object], parameter_value))
             if Parameter.Type.BOOL_ARRAY == self:
                 return isinstance(parameter_value, (list, tuple)) and \
-                    all(isinstance(v, bool) for v in parameter_value)
+                    all(isinstance(v, bool) for v in cast(Iterable[object], parameter_value))
             if Parameter.Type.INTEGER_ARRAY == self:
                 return isinstance(parameter_value, (list, tuple, array.array)) and \
-                    all(isinstance(v, int) for v in parameter_value)
+                    all(isinstance(v, int) for v in cast(Iterable[object], parameter_value))
             if Parameter.Type.DOUBLE_ARRAY == self:
                 return isinstance(parameter_value, (list, tuple, array.array)) and \
-                    all(isinstance(v, float) for v in parameter_value)
+                    all(isinstance(v, float) for v in cast(Iterable[object], parameter_value))
             if Parameter.Type.STRING_ARRAY == self:
                 return isinstance(parameter_value, (list, tuple)) and \
-                    all(isinstance(v, str) for v in parameter_value)
+                    all(isinstance(v, str) for v in cast(Iterable[object], parameter_value))
             return False
 
     @classmethod
-    def from_parameter_msg(cls, param_msg):
-        value = None
+    def from_parameter_msg(cls, param_msg: ParameterMsg) -> Self:
+        value: object = None
         type_ = Parameter.Type(value=param_msg.value.type)
         if Parameter.Type.BOOL == type_:
             value = param_msg.value.bool_value
@@ -140,12 +144,12 @@ class Parameter:
             value = param_msg.value.string_array_value
         return cls(param_msg.name, type_, value)
 
-    def __init__(self, name, type_=None, value=None):
+    def __init__(self, name: str, type_: Optional[Parameter.Type]=None, value: object=None) -> None:
         if type_ is None:
             # This will raise a TypeError if it is not possible to get a type from the value.
             type_ = Parameter.Type.from_parameter_value(value)
 
-        if not isinstance(type_, Parameter.Type):
+        if not isinstance(cast(object, type_), Parameter.Type):
             raise TypeError("type must be an instance of '{}'".format(repr(Parameter.Type)))
 
         if not type_.check(value):
@@ -153,43 +157,43 @@ class Parameter:
 
         self._type_ = type_
         self._name = name
-        self._value = value
+        self._value: AllowableParameterValue = cast(AllowableParameterValue, value)
 
     @property
-    def name(self):
+    def name(self) -> str:
         return self._name
 
     @property
-    def type_(self):
+    def type_(self) -> 'Parameter.Type':
         return self._type_
 
     @property
-    def value(self):
+    def value(self) -> AllowableParameterValue:
         return self._value
 
-    def get_parameter_value(self):
+    def get_parameter_value(self) -> ParameterValue:
         parameter_value = ParameterValue(type=self.type_.value)
         if Parameter.Type.BOOL == self.type_:
-            parameter_value.bool_value = self.value
+            parameter_value.bool_value = cast('bool', self.value)
         elif Parameter.Type.INTEGER == self.type_:
-            parameter_value.integer_value = self.value
+            parameter_value.integer_value = cast('int', self.value)
         elif Parameter.Type.DOUBLE == self.type_:
-            parameter_value.double_value = self.value
+            parameter_value.double_value = cast('float', self.value)
         elif Parameter.Type.STRING == self.type_:
-            parameter_value.string_value = self.value
+            parameter_value.string_value = cast('str', self.value)
         elif Parameter.Type.BYTE_ARRAY == self.type_:
-            parameter_value.byte_array_value = self.value
+            parameter_value.byte_array_value = cast('list[bytes] | tuple[bytes, ...]', self.value)
         elif Parameter.Type.BOOL_ARRAY == self.type_:
-            parameter_value.bool_array_value = self.value
+            parameter_value.bool_array_value = cast('list[bool] | tuple[bool, ...]', self.value)
         elif Parameter.Type.INTEGER_ARRAY == self.type_:
-            parameter_value.integer_array_value = self.value
+            parameter_value.integer_array_value = cast('list[int] | tuple[int, ...] | array.array[int]', self.value)
         elif Parameter.Type.DOUBLE_ARRAY == self.type_:
-            parameter_value.double_array_value = self.value
+            parameter_value.double_array_value = cast('list[float] | tuple[float, ...] | array.array[float]', self.value)
         elif Parameter.Type.STRING_ARRAY == self.type_:
-            parameter_value.string_array_value = self.value
+            parameter_value.string_array_value = cast('list[str] | tuple[str, ...]', self.value)
         return parameter_value
 
-    def to_parameter_msg(self):
+    def to_parameter_msg(self) -> ParameterMsg:
         return ParameterMsg(name=self.name, value=self.get_parameter_value())
 
 
@@ -202,7 +206,7 @@ def get_parameter_value(string_value: str) -> ParameterValue:
     """
     value = ParameterValue()
     try:
-        yaml_value = yaml.safe_load(string_value)
+        yaml_value = cast(Callable[[str | TextIO], object], getattr(yaml, 'safe_load'))(string_value)
     except yaml.parser.ParserError:
         yaml_value = string_value
 
@@ -216,28 +220,29 @@ def get_parameter_value(string_value: str) -> ParameterValue:
         value.type = ParameterType.PARAMETER_DOUBLE
         value.double_value = yaml_value
     elif isinstance(yaml_value, list):
-        if all((isinstance(v, bool) for v in yaml_value)):
+        yaml_value = cast(list[object], yaml_value)
+        if all((isinstance(v, bool) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_BOOL_ARRAY
-            value.bool_array_value = yaml_value
-        elif all((isinstance(v, int) for v in yaml_value)):
+            value.bool_array_value = cast(list[bool], yaml_value)
+        elif all((isinstance(v, int) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_INTEGER_ARRAY
-            value.integer_array_value = yaml_value
-        elif all((isinstance(v, float) for v in yaml_value)):
+            value.integer_array_value = cast(list[int], yaml_value)
+        elif all((isinstance(v, float) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_DOUBLE_ARRAY
-            value.double_array_value = yaml_value
-        elif all((isinstance(v, str) for v in yaml_value)):
+            value.double_array_value = cast(list[float], yaml_value)
+        elif all((isinstance(v, str) for v in cast(Iterable[object], yaml_value))):
             value.type = ParameterType.PARAMETER_STRING_ARRAY
-            value.string_array_value = yaml_value
+            value.string_array_value = cast(list[str], yaml_value)
         else:
             value.type = ParameterType.PARAMETER_STRING
             value.string_value = string_value
     else:
         value.type = ParameterType.PARAMETER_STRING
-        value.string_value = yaml_value if yaml_value is not None else string_value
+        value.string_value = yaml_value if isinstance(yaml_value, str) else string_value
     return value
 
 
-def parameter_value_to_python(parameter_value: ParameterValue):
+def parameter_value_to_python(parameter_value: ParameterValue) -> AllowableParameterValue:
     """
     Get the value for the Python builtin type from a rcl_interfaces/msg/ParameterValue object.
 
@@ -294,9 +299,10 @@ def parameter_dict_from_yaml_file(
     :return: A dict of Parameter messages keyed by the parameter names
     """
     with open(parameter_file, 'r') as f:
-        param_file = yaml.safe_load(f)
-        param_keys = []
-        param_dict = {}
+        param_file = cast(dict[str, dict[str, dict[str, object]]],
+                          cast(Callable[[str | TextIO], object], getattr(yaml, 'safe_load'))(f))
+        param_keys: list[str] = []
+        param_dict: dict[str, object] = {}
 
         if use_wildcard:
             if '/**' in param_file:
@@ -313,13 +319,13 @@ def parameter_dict_from_yaml_file(
                 # /**/node_name
                 #   ros__parameters:
                 #     ...
-                for k, v in param_file.items():
+                for k, _v in param_file.items():
                     if k.startswith('/**/'):
                         param_keys.append(k)
 
         if target_nodes:
             for n in target_nodes:
-                if n is None or n == '':
+                if cast(object, n) is None or n == '':
                     continue
 
                 # Get absolute node name
@@ -376,7 +382,7 @@ def parameter_dict_from_yaml_file(
                 #     ros__parameters:
                 #       ...
                 if use_wildcard and '/' not in ns[1:] and '/*' in param_file:
-                    if not isinstance(param_file['/*'], dict):
+                    if not isinstance(cast(object, param_file['/*']), dict):
                         raise RuntimeError(
                             'YAML file is not a valid ROS parameter file for namespace "/*"')
                     if node_name in param_file['/*']:
@@ -397,7 +403,7 @@ def parameter_dict_from_yaml_file(
                 #   node_name:
                 #     ros__parameters:
                 #       ...
-                if ns in param_file and isinstance(param_file[ns], dict):
+                if ns in param_file and isinstance(cast(object, param_file[ns]), dict):
                     if node_name in param_file[ns]:
                         param_keys.append(ns + '#' + node_name)
 
@@ -431,13 +437,13 @@ def parameter_dict_from_yaml_file(
             #       ...
             if '#' in n:
                 ns, node_name = n.split('#', 1)
-                if (isinstance(param_file[ns][node_name], dict) and
+                if (isinstance(cast(object, param_file[ns][node_name]), dict) and
                         'ros__parameters' in param_file[ns][node_name]):
-                    param_dict.update(param_file[ns][node_name]['ros__parameters'])
+                    param_dict.update(cast(dict[str, object], param_file[ns][node_name]['ros__parameters']))
                     continue
             else:
                 value = param_file[n]
-                if isinstance(value, dict):
+                if isinstance(cast(object, value), dict):
                     if 'ros__parameters' in value:
                         param_dict.update(value['ros__parameters'])
                         continue
@@ -445,11 +451,11 @@ def parameter_dict_from_yaml_file(
                         if n in param_file:
                             # n is namespace (e.g. '/*'). Add all node parameters under
                             # this namespace
-                            if isinstance(param_file[n], dict):
+                            if isinstance(cast(object, param_file[n]), dict):
                                 for node_name, param_value in param_file[n].items():
-                                    if (isinstance(param_value, dict) and
+                                    if (isinstance(cast(object, param_value), dict) and
                                             'ros__parameters' in param_value):
-                                        param_dict.update(param_value['ros__parameters'])
+                                        param_dict.update(cast(dict[str, object], param_value['ros__parameters']))
                                     else:
                                         raise RuntimeError(
                                             f'YAML file is not a valid ROS parameter file for node'
@@ -460,7 +466,7 @@ def parameter_dict_from_yaml_file(
         return _unpack_parameter_dict(namespace, param_dict)
 
 
-def _unpack_parameter_dict(namespace, parameter_dict):
+def _unpack_parameter_dict(namespace: str, parameter_dict: Dict[str, object]) -> Dict[str, ParameterMsg]:
     """
     Flatten a parameter dictionary recursively.
 
@@ -475,7 +481,7 @@ def _unpack_parameter_dict(namespace, parameter_dict):
         if isinstance(param_value, dict):
             parameters.update(_unpack_parameter_dict(
                     namespace=full_param_name + PARAMETER_SEPARATOR_STRING,
-                    parameter_dict=param_value))
+                    parameter_dict=cast(dict[str, object], param_value)))
         else:
             parameter = ParameterMsg()
             parameter.name = full_param_name

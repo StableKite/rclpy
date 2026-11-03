@@ -23,6 +23,7 @@
 
 #include <memory>
 
+#include "cleanup_warning.hpp"
 #include "destroyable.hpp"
 #include "exceptions.hpp"
 
@@ -30,6 +31,8 @@ namespace py = pybind11;
 
 namespace rclpy
 {
+struct ContextState;
+
 struct InitOptions
 {
   explicit InitOptions(rcl_allocator_t allocator)
@@ -45,11 +48,8 @@ struct InitOptions
   {
     rcl_ret_t ret = rcl_init_options_fini(&rcl_options);
     if (RCL_RET_OK != ret) {
-      int stack_level = 1;
-      PyErr_WarnFormat(
-        PyExc_RuntimeWarning, stack_level,
-        "[rclpy| %s : %s ]: failed to fini rcl_init_options_t in destructor: %s",
-        RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+      warn_cleanup_error(
+        "fini", "rcl_init_options_t in destructor", rcl_get_error_string().str);
       rcl_reset_error();
     }
   }
@@ -72,6 +72,8 @@ public:
    */
   Context(py::list pyargs, size_t domain_id);
 
+  Context(const Context & other);
+
   /// Retrieves domain id from init_options of context
   /**
    * \param[in] pycontext Capsule containing rcl_context_t
@@ -91,16 +93,16 @@ public:
   shutdown();
 
   /// Get rcl_context_t pointer
-  rcl_context_t * rcl_ptr() const
-  {
-    return rcl_context_.get();
-  }
+  rcl_context_t * rcl_ptr() const;
+
+  /// Keep the native context alive across a call that can race with destroy().
+  std::shared_ptr<rcl_context_t> rcl_handle() const;
 
   /// Force an early destruction of this object
   void destroy() override;
 
 private:
-  std::shared_ptr<rcl_context_t> rcl_context_;
+  std::shared_ptr<ContextState> state_;
 };
 
 /// Define a pybind11 wrapper for an rclpy::Context

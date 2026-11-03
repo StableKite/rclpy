@@ -459,3 +459,16 @@ class TestParameter(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_unsupported_yaml_values_preserve_the_original_string():
+    from rcl_interfaces.msg import ParameterType
+    from rclpy.serialization import deserialize_message, serialize_message
+
+    for text in ('{a: b}', '2026-11-03', '!!set {a: null}'):
+        result = get_parameter_value(text)
+        assert result.type == ParameterType.PARAMETER_STRING
+        assert result.string_value == text
+        assert deserialize_message(serialize_message(result), type(result)) == result
+    assert get_parameter_value("'quoted text'").string_value == 'quoted text'
+    assert get_parameter_value('null').string_value == 'null'

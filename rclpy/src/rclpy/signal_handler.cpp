@@ -21,13 +21,19 @@
 #include <rcl/guard_condition.h>
 #include <rcutils/logging_macros.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
+#include <cstdio>
 #include <csignal>
-#include <list>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "context.hpp"
 #include "guard_condition.hpp"
@@ -45,7 +51,6 @@
 namespace py = pybind11;
 
 static bool trigger_guard_conditions();
-static void invoke_callbacks();
 
 namespace
 {
@@ -59,8 +64,25 @@ sem_t g_signal_handler_sem;
 
 std::thread g_deferred_signal_handling_thread;
 
-// relying on python GIL for safety
-std::atomic<bool> g_signal_handler_installed = false;
+// All lifecycle entry points are serialized without retaining Python state.
+// The asynchronous handler only uses lock-free atomics and the OS semaphore.
+std::mutex g_signal_lifecycle_mutex;
+std::atomic<bool> g_signal_handler_installed{false};
+std::atomic<bool> g_signal_notifier_enabled{false};
+std::atomic<unsigned int> g_signal_notifiers{0};
+static_assert(std::atomic<bool>::is_always_lock_free, "signal flag must be lock-free");
+static_assert(std::atomic<unsigned int>::is_always_lock_free, "signal readers must be lock-free");
+
+void release_signal_caller(std::optional<py::gil_scoped_release> & release)
+{
+#if PY_VERSION_HEX >= 0x030D0000
+  if (Py_IsInitialized() && PyThreadState_GetUnchecked() != nullptr) {
+#else
+  if (Py_IsInitialized() && PyGILState_Check()) {
+#endif
+    release.emplace();
+  }
+}
 
 void
 notify_signal_handler() noexcept
@@ -119,88 +141,101 @@ wait_for_signal()
 void
 setup_deferred_signal_handler()
 {
-  if (g_signal_handler_installed.exchange(true)) {
+  if (g_signal_handler_installed.load()) {
     return;
   }
 #if defined(_WIN32)
-  g_signal_handler_sem = CreateSemaphore(
-    NULL,  // default security attributes
-    0,  // initial semaphore count
-    1,  // maximum semaphore count
-    NULL);  // unnamed semaphore
+  g_signal_handler_sem = CreateSemaphore(NULL, 0, 1, NULL);
   if (NULL == g_signal_handler_sem) {
     throw std::runtime_error("CreateSemaphore() failed in setup_wait_for_signal()");
   }
 #elif defined(__APPLE__)
   g_signal_handler_sem = dispatch_semaphore_create(0);
-#else  // posix
+  if (!g_signal_handler_sem) {
+    throw std::runtime_error("dispatch_semaphore_create() failed");
+  }
+#else
   if (-1 == sem_init(&g_signal_handler_sem, 0, 0)) {
     throw std::runtime_error(std::string("sem_init() failed: ") + strerror(errno));
   }
 #endif
-  g_deferred_signal_handling_thread = std::thread(
-    []() {
-      while (g_signal_handler_installed.load()) {
-        wait_for_signal();
-        if (g_signal_handler_installed.load()) {
-          trigger_guard_conditions();
-          rclpy::shutdown_contexts();
-          // TODO(bmartin427) It feels like I want to do this *after* the contexts are shut down,
-          // to ensure the callbacks see the shut down state, and we don't end up going back to
-          // spin again.  But I'm not sure why the same argument doesn't hold for the guard
-          // conditions above.
-          invoke_callbacks();
+  g_signal_handler_installed.store(true);
+  try {
+    g_deferred_signal_handling_thread = std::thread([]() {
+        while (g_signal_handler_installed.load()) {
+          wait_for_signal();
+          if (!g_signal_handler_installed.load()) {
+            break;
+          }
+          try {
+            trigger_guard_conditions();
+            rclpy::shutdown_contexts();
+            rclpy::detail::invoke_signal_callbacks();
+          } catch (const std::exception & error) {
+            // Never unwind out of a native thread entry point.
+            std::fprintf(stderr, "rclpy deferred signal handling failed: %s\n", error.what());
+          } catch (...) {
+            std::fputs("rclpy deferred signal handling failed: unknown exception\n", stderr);
+          }
         }
-      }
-    });
+      });
+  } catch (...) {
+    g_signal_handler_installed.store(false);
+#if defined(_WIN32)
+    CloseHandle(g_signal_handler_sem);
+#elif defined(__APPLE__)
+    dispatch_release(g_signal_handler_sem);
+#else
+    sem_destroy(&g_signal_handler_sem);
+#endif
+    throw;
+  }
+  // Publish only after both the semaphore and worker exist.
+  g_signal_notifier_enabled.store(true);
 }
 
 void
 teardown_deferred_signal_handler()
 {
-  if (!g_signal_handler_installed.exchange(false)) {
+  if (!g_signal_handler_installed.load()) {
     return;
   }
+  g_signal_notifier_enabled.store(false);
+  // A reader that saw enabled=true must finish before the semaphore closes.
+  // Readers entering later see false and never touch its OS allocation.
+  while (g_signal_notifiers.load() != 0) {
+    std::this_thread::yield();
+  }
+  g_signal_handler_installed.store(false);
   notify_signal_handler();
   g_deferred_signal_handling_thread.join();
 #if defined(_WIN32)
   CloseHandle(g_signal_handler_sem);
 #elif defined(__APPLE__)
   dispatch_release(g_signal_handler_sem);
-#else  // posix
+#else
   if (-1 == sem_destroy(&g_signal_handler_sem)) {
-    std::runtime_error{"invalid semaphore in teardown_wait_for_signal()"};
+    std::fputs("rclpy failed to destroy the signal semaphore\n", stderr);
   }
 #endif
 }
 
-struct CleanupdeferredSignalHandler
+void notify_from_signal() noexcept
 {
-  ~CleanupdeferredSignalHandler()
-  {
-    // just in case nobody calls rclpy.shutdown()
-    teardown_deferred_signal_handler();
+  const int saved_errno = errno;
+  g_signal_notifiers.fetch_add(1);
+  if (g_signal_notifier_enabled.load()) {
+    notify_signal_handler();
   }
-};
-
-// TODO(ivanpauno): Create a singleton SignalHandler class instead of this mess.
-CleanupdeferredSignalHandler cleanup_deferred_signal_handler;
+  g_signal_notifiers.fetch_sub(1);
+  errno = saved_errno;
+}
 
 }  // namespace
 
 #if __APPLE__ || _POSIX_C_SOURCE >= 1 || _XOPEN_SOURCE || _POSIX_SOURCE
 
 #define SIGNAL_HANDLER_T struct sigaction
-
-static SIGNAL_HANDLER_T
-make_null_signal_handler()
-{
-  SIGNAL_HANDLER_T handler;
-  memset(&handler, 0, sizeof(handler));
-  return handler;
-}
-
-#define NULL_SIGNAL_HANDLER make_null_signal_handler()
 
 #define DEFINE_SIGNAL_HANDLER(name) \
   static void _ ## name(int signum, siginfo_t * info, void * context); \
@@ -242,8 +277,19 @@ static SIGNAL_HANDLER_T
 install_signal_handler(int signum, SIGNAL_HANDLER_T handler)
 {
   SIGNAL_HANDLER_T old_handler;
-  sigaction(signum, &handler, &old_handler);
+  if (sigaction(signum, &handler, &old_handler) != 0) {
+    throw std::runtime_error("sigaction() failed");
+  }
   return old_handler;
+}
+
+static SIGNAL_HANDLER_T query_signal_handler(int signum)
+{
+  SIGNAL_HANDLER_T handler;
+  if (sigaction(signum, nullptr, &handler) != 0) {
+    throw std::runtime_error("sigaction() query failed");
+  }
+  return handler;
 }
 
 #define is_null_signal_handler(handler) \
@@ -280,284 +326,258 @@ call_signal_handler(
   }
 }
 
-#define install_signal_handler(signum, handler) signal(signum, handler)
+static SIGNAL_HANDLER_T install_signal_handler(int signum, SIGNAL_HANDLER_T handler)
+{
+  const auto previous = std::signal(signum, handler);
+  if (previous == SIG_ERR) {
+    throw std::runtime_error("signal() failed");
+  }
+  return previous;
+}
+
+static SIGNAL_HANDLER_T query_signal_handler(int signum)
+{
+#ifdef _WIN32
+  // Supported UCRT query; unlike PyOS_getsig's fallback it does not ignore
+  // signals temporarily while looking up the previous handler.
+  return install_signal_handler(signum, SIG_GET);
+#else
+  return PyOS_getsig(signum);
+#endif
+}
 
 #define is_null_signal_handler(signal_handler) (NULL_SIGNAL_HANDLER == signal_handler)
 
 #endif
 
-// Forward declarations
-static void unregister_sigint_signal_handler();
-static void unregister_sigterm_signal_handler();
+// The async handler never reads mutable sigaction storage. Records are
+// immutable and retired only by lifecycle callers after all readers leave.
+struct PreviousSignalHandler
+{
+  explicit PreviousSignalHandler(SIGNAL_HANDLER_T value) : handler(value) {}
+  const SIGNAL_HANDLER_T handler;
+};
 
-/// Original signal handler for chaining purposes
-SIGNAL_HANDLER_T g_original_sigint_handler;
+struct SignalHandlerState
+{
+  std::atomic<PreviousSignalHandler *> original{nullptr};
+  std::atomic<unsigned int> readers{0};
+  std::vector<std::unique_ptr<PreviousSignalHandler>> records;
+  bool installed = false;  // protected by g_signal_lifecycle_mutex
+  std::atomic<bool> armed{false};
 
-/// Original sigterm handler for chaining purposes
-SIGNAL_HANDLER_T g_original_sigterm_handler;
+  void publish(SIGNAL_HANDLER_T handler)
+  {
+    auto record = std::make_unique<PreviousSignalHandler>(handler);
+    auto * current = record.get();
+    records.push_back(std::move(record));
+    original.store(current);
+    if (readers.load() == 0) {
+      records.erase(std::remove_if(records.begin(), records.end(),
+        [current](const auto & value) {return value.get() != current;}), records.end());
+    }
+  }
+};
+static_assert(std::atomic<PreviousSignalHandler *>::is_always_lock_free,
+  "original signal handler publication must be lock-free");
 
-/// Flag to indicate if a sigint handler was installed
-static bool g_sigint_installed;
+SignalHandlerState g_sigint;
+SignalHandlerState g_sigterm;
 
-/// Flag to indicate if a sigterm handler was installed
-static bool g_sigterm_installed;
-
-/// Signal handler function
 DEFINE_SIGNAL_HANDLER(rclpy_sigint_handler)
 {
-  if (!is_null_signal_handler(g_original_sigint_handler)) {
-    call_signal_handler(g_original_sigint_handler, SIGNAL_HANDLER_ARGS);
+  const int saved_errno = errno;
+  g_sigint.readers.fetch_add(1);
+  if (const auto * previous = g_sigint.original.load()) {
+    call_signal_handler(previous->handler, SIGNAL_HANDLER_ARGS);
   }
-
-  if (!g_signal_handler_installed.load()) {
-    // There may have been another signal handler chaining to this
-    // one when we last tried to unregister ourselves.
-
-    // Try to unregister again.
-    unregister_sigint_signal_handler();
-  } else {
-    notify_signal_handler();
+#ifdef _WIN32
+  // UCRT resets a delivered handler; CPython also reinstalls its predecessor.
+  // Rearm after chaining, while uninstall waits for this reader to finish.
+  if (g_sigint.armed.load()) {
+    std::signal(SIGINT, get_rclpy_sigint_handler());
   }
+#endif
+  g_sigint.readers.fetch_sub(1);
+  if (g_sigint.armed.load()) {
+    notify_from_signal();
+  }
+  errno = saved_errno;
 }
 
-/// Signal handler function
 DEFINE_SIGNAL_HANDLER(rclpy_sigterm_handler)
 {
-  if (!is_null_signal_handler(g_original_sigterm_handler)) {
-    call_signal_handler(g_original_sigterm_handler, SIGNAL_HANDLER_ARGS);
+  const int saved_errno = errno;
+  g_sigterm.readers.fetch_add(1);
+  if (const auto * previous = g_sigterm.original.load()) {
+    call_signal_handler(previous->handler, SIGNAL_HANDLER_ARGS);
   }
-
-  if (!g_signal_handler_installed.load()) {
-    // There may have been another signal handler chaining to this
-    // one when we last tried to unregister ourselves.
-
-    // Try to unregister again.
-    unregister_sigterm_signal_handler();
-  } else {
-    notify_signal_handler();
+#ifdef _WIN32
+  if (g_sigterm.armed.load()) {
+    std::signal(SIGTERM, get_rclpy_sigterm_handler());
   }
+#endif
+  g_sigterm.readers.fetch_sub(1);
+  if (g_sigterm.armed.load()) {
+    notify_from_signal();
+  }
+  errno = saved_errno;
 }
 
-/// Unregister our SIGINT handler and restore the original one
-static void
-unregister_sigint_signal_handler()
+static void register_sigint_signal_handler()
 {
-  const SIGNAL_HANDLER_T current_sigint_handler =
-    install_signal_handler(SIGINT, g_original_sigint_handler);
-  if (!is_rclpy_sigint_handler(current_sigint_handler)) {
-    // Oops, someone else must have registered a signal handler
-    // that chains to us put it back so it continues to work
-    install_signal_handler(SIGINT, current_sigint_handler);
+  if (g_sigint.installed) {
+    g_sigint.armed.store(true);
     return;
   }
-  // Got ourself out of the chain
-  g_original_sigint_handler = NULL_SIGNAL_HANDLER;
-  g_sigint_installed = false;
-}
-
-/// Register our SIGINT handler and store the current one
-static void
-register_sigint_signal_handler()
-{
-  if (g_sigint_installed) {
-    // Handler already registered
-    return;
-  }
-  g_sigint_installed = true;
-  g_original_sigint_handler =
+  // Publish before installing: the OS may deliver as soon as it sees our
+  // function pointer. Other rclpy setters are serialized by the lifecycle lock.
+  g_sigint.publish(query_signal_handler(SIGINT));
+  g_sigint.armed.store(true);
+  try {
     install_signal_handler(SIGINT, get_rclpy_sigint_handler());
+    g_sigint.installed = true;
+  } catch (...) {
+    g_sigint.armed.store(false);
+    throw;
+  }
 }
 
-/// Unregister our SIGTERM handler and restore the original one
-static void
-unregister_sigterm_signal_handler()
+static void register_sigterm_signal_handler()
 {
-  const SIGNAL_HANDLER_T current_sigterm_handler =
-    install_signal_handler(SIGTERM, g_original_sigterm_handler);
-  if (!is_rclpy_sigterm_handler(current_sigterm_handler)) {
-    // Oops, someone else must have registered a signal handler
-    // that chains to us put it back so it continues to work
-    install_signal_handler(SIGTERM, current_sigterm_handler);
+  if (g_sigterm.installed) {
+    g_sigterm.armed.store(true);
     return;
   }
-  // Got ourself out of the chain
-  g_original_sigterm_handler = NULL_SIGNAL_HANDLER;
-  g_sigterm_installed = false;
-}
-
-/// Register our SIGTERM handler and store the current one
-static void
-register_sigterm_signal_handler()
-{
-  if (g_sigterm_installed) {
-    // Handler already registered
-    return;
-  }
-  g_sigterm_installed = true;
-  g_original_sigterm_handler =
+  g_sigterm.publish(query_signal_handler(SIGTERM));
+  g_sigterm.armed.store(true);
+  try {
     install_signal_handler(SIGTERM, get_rclpy_sigterm_handler());
+    g_sigterm.installed = true;
+  } catch (...) {
+    g_sigterm.armed.store(false);
+    throw;
+  }
 }
 
-/// Global reference to guard conditions
-/// End with sentinel value instead of count to avoid mismatch if signal
-/// interrupts while adding or removing from the list
-std::atomic<rcl_guard_condition_t **> g_guard_conditions;
+static void unregister_sigint_signal_handler()
+{
+  g_sigint.armed.store(false);
+  while (g_sigint.readers.load() != 0) {
+    std::this_thread::yield();
+  }
+  if (!g_sigint.installed) {
+    return;
+  }
+  const auto current = query_signal_handler(SIGINT);
+  bool restore = is_rclpy_sigint_handler(current);
+#ifdef _WIN32
+  // UCRT resets before entering a delivered handler. Its predecessor may
+  // already have reinstalled itself while this unregister was draining it.
+  restore = restore || current == SIG_DFL || current == g_sigint.original.load()->handler;
+#endif
+  if (restore) {
+    install_signal_handler(SIGINT, g_sigint.original.load()->handler);
+    g_sigint.installed = false;
+  }
+  // If another library chains to us, keep its handler and our immutable
+  // predecessor intact. Async delivery must never try to edit this chain.
+}
 
-/// Trigger all registered guard conditions
-/**
- * This triggers guard conditions when a signal is received.
- * These wake executors currently blocked in `rcl_wait`.
- * Returns True if at least one guard condition was triggered.
- */
+static void unregister_sigterm_signal_handler()
+{
+  g_sigterm.armed.store(false);
+  while (g_sigterm.readers.load() != 0) {
+    std::this_thread::yield();
+  }
+  if (!g_sigterm.installed) {
+    return;
+  }
+  const auto current = query_signal_handler(SIGTERM);
+  bool restore = is_rclpy_sigterm_handler(current);
+#ifdef _WIN32
+  restore = restore || current == SIG_DFL || current == g_sigterm.original.load()->handler;
+#endif
+  if (restore) {
+    install_signal_handler(SIGTERM, g_sigterm.original.load()->handler);
+    g_sigterm.installed = false;
+  }
+}
+
+// This registry is read by the deferred worker, never by the asynchronous
+// OS signal handler. Weak registrations do not pin abandoned Python guards;
+// owning snapshots keep both the native guard and its context alive while
+// rcl_trigger_guard_condition runs.
+std::vector<std::weak_ptr<rcl_guard_condition_t>> g_guard_conditions;
+std::mutex g_guard_conditions_mutex;
+
 static bool
 trigger_guard_conditions()
 {
-  rcl_guard_condition_t ** guard_conditions = g_guard_conditions.load();
-  if (!guard_conditions || !guard_conditions[0]) {
-    return false;
+  std::vector<std::shared_ptr<rcl_guard_condition_t>> guards;
+  {
+    std::lock_guard<std::mutex> lock(g_guard_conditions_mutex);
+    // Allocate before locking any weak resource. Last owners and their native
+    // finalizers must be released after this registry mutex is unlocked.
+    guards.reserve(g_guard_conditions.size());
+    for (auto it = g_guard_conditions.begin(); it != g_guard_conditions.end(); ) {
+      if (auto guard = it->lock()) {
+        guards.push_back(std::move(guard));
+        ++it;
+      } else {
+        it = g_guard_conditions.erase(it);
+      }
+    }
   }
-
-  rcl_guard_condition_t ** pgc = guard_conditions;
-  // Trigger python signal handlers
-  while (NULL != *pgc) {
-    rcl_ret_t ret = rcl_trigger_guard_condition(*pgc);
+  for (const auto & guard : guards) {
+    rcl_ret_t ret = rcl_trigger_guard_condition(guard.get());
     if (ret != RCL_RET_OK) {
       RCUTILS_LOG_ERROR_NAMED(
         "rclpy.signals",
         "rcl_trigger_guard_condition() failed: %s", rcutils_get_error_string().str);
       rcl_reset_error();
     }
-    ++pgc;
   }
-  return true;
+  return !guards.empty();
 }
 
 namespace rclpy
 {
-/// Warn if getting g_guard_conditions could deadlock the signal handler
-void
-check_signal_safety()
-{
-  static bool did_warn = false;
-  if (!did_warn && !g_guard_conditions.is_lock_free()) {
-    did_warn = true;
-    const char * deadlock_msg =
-      "Global guard condition list access is not lock-free on this platform."
-      "The program may deadlock when receiving SIGINT.";
-    if (PyErr_WarnEx(PyExc_ResourceWarning, deadlock_msg, 1)) {
-      throw py::error_already_set();
-    }
-  }
-}
-
-/// Register a guard condition to be triggered when SIGINT is received.
-/**
- * Raises ValueError if the argument was already registered
- *
- * \param[in] guard_condition a guard condition
- * \return None
- */
 void
 register_sigint_guard_condition(const GuardCondition & guard_condition)
 {
-  check_signal_safety();
-
-  rcl_guard_condition_t * gc = guard_condition.rcl_ptr();
-  rcl_guard_condition_t ** guard_conditions = g_guard_conditions.load();
-
-  // Figure out how big the list currently is
-  size_t count_gcs = 0;
-  if (NULL != guard_conditions) {
-    while (NULL != guard_conditions[count_gcs]) {
-      if (gc == guard_conditions[count_gcs]) {
-        throw py::value_error("Guard condition was already registered");
-      }
-      ++count_gcs;
+  auto guard = guard_condition.rcl_handle();
+  std::lock_guard<std::mutex> lock(g_guard_conditions_mutex);
+  g_guard_conditions.erase(
+    std::remove_if(g_guard_conditions.begin(), g_guard_conditions.end(),
+      [](const auto & weak) {return weak.expired();}), g_guard_conditions.end());
+  for (const auto & weak : g_guard_conditions) {
+    if (!weak.owner_before(guard) && !guard.owner_before(weak)) {
+      throw py::value_error("Guard condition was already registered");
     }
   }
-
-  // Current size of guard condition list: count_gcs + 1 (sentinel value)
-  // Allocate space for one more guard condition: count_cs + 1 (new gc) + 1 (sentinel value)
-  rcl_allocator_t allocator = rcl_get_default_allocator();
-  auto new_gcs = static_cast<rcl_guard_condition_t **>(
-    allocator.allocate(sizeof(rcl_guard_condition_t *) * (count_gcs + 2), allocator.state));
-
-  // populate the new guard condition list, ending with a sentinel of NULL
-  for (size_t i = 0; i < count_gcs; ++i) {
-    new_gcs[i] = guard_conditions[i];
-  }
-  new_gcs[count_gcs] = gc;
-  new_gcs[count_gcs + 1] = NULL;
-
-  // Swap the lists and free the old
-  rcl_guard_condition_t ** old_gcs = g_guard_conditions.exchange(new_gcs);
-  if (NULL != old_gcs) {
-    allocator.deallocate(old_gcs, allocator.state);
-  }
+  g_guard_conditions.push_back(guard);
 }
 
-/// Unregister a guard condition so it is not triggered when SIGINT is received.
-/**
- * Raises ValueError if the argument was not registered
- *
- * \param[in] guard_condition a guard condition
- * \return None
- */
 void
 unregister_sigint_guard_condition(const GuardCondition & guard_condition)
 {
-  rcl_guard_condition_t * gc = guard_condition.rcl_ptr();
-  rcl_guard_condition_t ** guard_conditions = g_guard_conditions.load();
-
-  // Figure out how big the list currently is
-  size_t count_gcs = 0;
-  bool found_gc = false;
-  // assumes guard condition was only added to list once
-  size_t found_index = 0;
-
-  if (NULL != guard_conditions) {
-    while (NULL != guard_conditions[count_gcs]) {
-      if (gc == guard_conditions[count_gcs]) {
-        found_gc = true;
-        found_index = count_gcs;
-      }
-      ++count_gcs;
-    }
+  auto guard = guard_condition.rcl_handle();
+  bool found = false;
+  {
+    std::lock_guard<std::mutex> lock(g_guard_conditions_mutex);
+    g_guard_conditions.erase(
+      std::remove_if(g_guard_conditions.begin(), g_guard_conditions.end(),
+        [&guard, &found](const auto & weak) {
+          if (!weak.owner_before(guard) && !guard.owner_before(weak)) {
+            found = true;
+            return true;
+          }
+          return weak.expired();
+        }), g_guard_conditions.end());
   }
-
-  if (!found_gc) {
+  if (!found) {
     throw py::value_error("Guard condition was not registered");
-  }
-
-  rcl_allocator_t allocator = rcl_get_default_allocator();
-
-  if (count_gcs == 1) {
-    // Just delete the list if there are no guard conditions left
-    rcl_guard_condition_t ** old_gcs = g_guard_conditions.exchange(NULL);
-    allocator.deallocate(old_gcs, allocator.state);
-  } else {
-    // Create space for one less guard condition
-    // current list size: count_gcs + 1 (sentinel)
-    // new list size: count_gcs - 1 (removing a guard condition) + 1 (sentinel)
-    rcl_allocator_t allocator = rcl_get_default_allocator();
-    auto new_gcs = static_cast<rcl_guard_condition_t **>(
-      allocator.allocate(sizeof(rcl_guard_condition_t *) * (count_gcs), allocator.state));
-
-    // Put remaining guard conditions in the list, ending with a sentinel of NULL
-    for (size_t i = 0; i < found_index; ++i) {
-      new_gcs[i] = guard_conditions[i];
-    }
-    // one less guard condition
-    --count_gcs;
-    for (size_t i = found_index; i < count_gcs; ++i) {
-      new_gcs[i] = guard_conditions[i + 1];
-    }
-    // Put sentinel at end
-    new_gcs[count_gcs] = NULL;
-
-    // Replace guard condition list
-    rcl_guard_condition_t ** old_gcs = g_guard_conditions.exchange(new_gcs);
-    allocator.deallocate(old_gcs, allocator.state);
   }
 }
 
@@ -581,6 +601,28 @@ enum class SignalHandlerOptions : int
 void
 install_signal_handlers(SignalHandlerOptions options)
 {
+  // Initialized on the first API use, after all registries in all translation
+  // units. Its destructor therefore stops the worker before those registries.
+  struct Cleanup
+  {
+    ~Cleanup()
+    {
+      try {
+        std::optional<py::gil_scoped_release> release;
+        release_signal_caller(release);
+        std::lock_guard<std::mutex> lock(g_signal_lifecycle_mutex);
+        unregister_sigint_signal_handler();
+        unregister_sigterm_signal_handler();
+        teardown_deferred_signal_handler();
+      } catch (const std::exception & error) {
+        std::fprintf(stderr, "rclpy signal cleanup failed: %s\n", error.what());
+      }
+    }
+  };
+  static Cleanup cleanup;
+  std::optional<py::gil_scoped_release> release;
+  release_signal_caller(release);
+  std::lock_guard<std::mutex> lock(g_signal_lifecycle_mutex);
   setup_deferred_signal_handler();
   switch (options) {
     case SignalHandlerOptions::No:
@@ -606,69 +648,33 @@ SignalHandlerOptions
 get_current_signal_handlers_options()
 {
   // conversion to SignalHandlerOptions value
-  return SignalHandlerOptions{g_sigterm_installed * 2 + g_sigint_installed};
+  std::optional<py::gil_scoped_release> release;
+  release_signal_caller(release);
+  std::lock_guard<std::mutex> lock(g_signal_lifecycle_mutex);
+  return SignalHandlerOptions{g_sigterm.armed.load() * 2 + g_sigint.armed.load()};
 }
 
 /// Uninstall the currently installed signal handlers.
 void
 uninstall_signal_handlers()
 {
+  std::optional<py::gil_scoped_release> release;
+  release_signal_caller(release);
+  std::lock_guard<std::mutex> lock(g_signal_lifecycle_mutex);
   unregister_sigint_signal_handler();
   unregister_sigterm_signal_handler();
   teardown_deferred_signal_handler();
 }
 
-// Storage for signal callbacks.
-// TODO(bmartin427) The management of g_guard_conditions seems overly complex.  That variable is
-// never touched directly from a signal handler as it has a separate thread on which the guard
-// conditions are triggered; however, there's an awful lot of code jumping through hoops that seem
-// unnecessary with that in mind.  I won't model the same behavior for the registered callbacks.
-std::list<std::function<void()>> g_callbacks;
-std::mutex g_callback_mutex;
-class ScopedSignalCallback::Impl
-{
-public:
-  explicit Impl(std::function<void()> callback)
-  {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
-    iterator_ = g_callbacks.insert(g_callbacks.end(), callback);
-  }
-
-  ~Impl()
-  {
-    std::lock_guard<std::mutex> lock(g_callback_mutex);
-    g_callbacks.erase(iterator_);
-  }
-
-private:
-  std::list<std::function<void()>>::iterator iterator_;
-};
-
-ScopedSignalCallback::ScopedSignalCallback(std::function<void()> cb)
-: impl_(std::make_shared<Impl>(cb))
-{
-}
-
-ScopedSignalCallback::~ScopedSignalCallback() {}
 
 }  // namespace rclpy
 
-static void invoke_callbacks()
-{
-  std::lock_guard<std::mutex> lock(rclpy::g_callback_mutex);
-  for (auto & cb : rclpy::g_callbacks) {
-    cb();
-  }
-}
 
 namespace rclpy
 {
 void
 define_signal_handler_api(py::module m)
 {
-  g_original_sigint_handler = NULL_SIGNAL_HANDLER;
-  g_original_sigterm_handler = NULL_SIGNAL_HANDLER;
-
   m.def(
     "register_sigint_guard_condition", &rclpy::register_sigint_guard_condition,
     "Register a guard condition to be called on SIGINT.");

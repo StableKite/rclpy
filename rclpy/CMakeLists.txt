@@ -11,7 +11,10 @@ endif()
 if(NOT CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 11)
 endif()
-if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+if(MSVC AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+  # clang-cl interprets plain -Wall as MSVC /Wall (all warning groups).
+  add_compile_options(/clang:-Wall /clang:-Wextra)
+elseif(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra)
 endif()
 
@@ -94,6 +97,7 @@ pybind11_add_module(_rclpy_pybind11
   src/rclpy/guard_condition.cpp
   src/rclpy/lifecycle.cpp
   src/rclpy/logging.cpp
+  src/rclpy/logging_guard.cpp
   src/rclpy/names.cpp
   src/rclpy/node.cpp
   src/rclpy/publisher.cpp
@@ -104,6 +108,7 @@ pybind11_add_module(_rclpy_pybind11
   src/rclpy/service_info.cpp
   src/rclpy/service_introspection.cpp
   src/rclpy/signal_handler.cpp
+  src/rclpy/scoped_signal_callback.cpp
   src/rclpy/subscription.cpp
   src/rclpy/time_point.cpp
   src/rclpy/timer.cpp
@@ -112,7 +117,7 @@ pybind11_add_module(_rclpy_pybind11
   src/rclpy/wait_set.cpp
 )
 
-if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND NOT APPLE AND NOT WIN32)
   target_link_libraries(_rclpy_pybind11 PRIVATE atomic)
 endif()
 
@@ -168,6 +173,188 @@ if(BUILD_TESTING)
   target_include_directories(test_python_allocator PRIVATE src/rclpy)
   target_link_libraries(test_python_allocator pybind11::embed)
 
+  find_package(Threads REQUIRED)
+  add_executable(test_destroyable_threading
+    test/test_destroyable_threading.cpp
+    src/rclpy/destroyable.cpp
+    src/rclpy/exceptions.cpp)
+  target_include_directories(test_destroyable_threading PRIVATE src/rclpy)
+  target_link_libraries(test_destroyable_threading PRIVATE
+    pybind11::embed Threads::Threads rcl::rcl rcutils::rcutils rmw::rmw)
+  set_target_properties(test_destroyable_threading PROPERTIES CXX_STANDARD 20)
+  add_test(NAME test_destroyable_threading COMMAND test_destroyable_threading)
+  set_tests_properties(test_destroyable_threading PROPERTIES TIMEOUT 60)
+
+  if(Python3_SOABI MATCHES "(cp[0-9]+t|cpython-[0-9]+t)")
+    add_executable(test_scoped_signal_callback
+      test/test_scoped_signal_callback.cpp
+      src/rclpy/scoped_signal_callback.cpp)
+    target_include_directories(test_scoped_signal_callback PRIVATE src/rclpy)
+    target_link_libraries(test_scoped_signal_callback PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_scoped_signal_callback PROPERTIES CXX_STANDARD 17)
+    if(WIN32)
+      target_compile_definitions(test_scoped_signal_callback PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_scoped_signal_callback COMMAND test_scoped_signal_callback)
+    set_tests_properties(test_scoped_signal_callback PROPERTIES TIMEOUT 60)
+
+    add_executable(test_logging_guard
+      test/test_logging_guard.cpp
+      src/rclpy/logging_guard.cpp)
+    target_include_directories(test_logging_guard PRIVATE src/rclpy)
+    target_link_libraries(test_logging_guard PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_logging_guard PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_logging_guard PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_logging_guard COMMAND test_logging_guard)
+    set_tests_properties(test_logging_guard PROPERTIES TIMEOUT 60)
+
+    add_executable(test_python_identity_map test/test_python_identity_map.cpp)
+    target_include_directories(test_python_identity_map PRIVATE src/rclpy)
+    target_link_libraries(test_python_identity_map PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_python_identity_map PROPERTIES CXX_STANDARD 17)
+    if(WIN32)
+      target_compile_definitions(test_python_identity_map PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_python_identity_map COMMAND test_python_identity_map)
+    set_tests_properties(test_python_identity_map PROPERTIES TIMEOUT 60)
+
+    add_executable(test_timer_reset_threading
+      test/test_timer_reset_threading.cpp
+      src/rclpy/clock.cpp
+      src/rclpy/context.cpp
+      src/rclpy/destroyable.cpp
+      src/rclpy/time_point.cpp
+      src/rclpy/timer.cpp
+      src/rclpy/utils.cpp
+      src/rclpy/exceptions.cpp)
+    target_include_directories(test_timer_reset_threading PRIVATE src/rclpy)
+    target_link_libraries(test_timer_reset_threading PRIVATE
+      pybind11::embed Threads::Threads rcl::rcl rcl_action::rcl_action rcpputils::rcpputils)
+    set_target_properties(test_timer_reset_threading PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_timer_reset_threading PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_timer_reset_threading COMMAND test_timer_reset_threading)
+    set_tests_properties(test_timer_reset_threading PROPERTIES TIMEOUT 60)
+
+    add_executable(test_events_callback_threading
+      test/test_events_callback_threading.cpp
+      src/rclpy/clock.cpp
+      src/rclpy/context.cpp
+      src/rclpy/destroyable.cpp
+      src/rclpy/time_point.cpp
+      src/rclpy/timer.cpp
+      src/rclpy/utils.cpp
+      src/rclpy/exceptions.cpp
+      src/rclpy/events_executor/rcl_support.cpp
+      src/rclpy/events_executor/events_queue.cpp)
+    target_include_directories(test_events_callback_threading PRIVATE src/rclpy)
+    target_link_libraries(test_events_callback_threading PRIVATE
+      pybind11::embed Threads::Threads rcl::rcl rcl_action::rcl_action rcpputils::rcpputils)
+    set_target_properties(test_events_callback_threading PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_events_callback_threading PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_events_callback_threading COMMAND test_events_callback_threading)
+    set_tests_properties(test_events_callback_threading PROPERTIES TIMEOUT 60)
+
+    add_executable(test_events_clock_threading
+      test/test_events_clock_threading.cpp
+      src/rclpy/clock.cpp
+      src/rclpy/context.cpp
+      src/rclpy/destroyable.cpp
+      src/rclpy/time_point.cpp
+      src/rclpy/timer.cpp
+      src/rclpy/utils.cpp
+      src/rclpy/exceptions.cpp
+      src/rclpy/events_executor/events_queue.cpp
+      src/rclpy/events_executor/timers_manager.cpp
+      src/rclpy/events_executor/delayed_event_thread.cpp)
+    target_include_directories(test_events_clock_threading PRIVATE src/rclpy)
+    target_link_libraries(test_events_clock_threading PRIVATE
+      pybind11::embed Threads::Threads rcl::rcl rcl_action::rcl_action rcpputils::rcpputils)
+    set_target_properties(test_events_clock_threading PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_events_clock_threading PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_events_clock_threading COMMAND test_events_clock_threading)
+    set_tests_properties(test_events_clock_threading PROPERTIES TIMEOUT 60)
+
+    add_executable(test_python_allocator_threading test/test_python_allocator_threading.cpp)
+    target_include_directories(test_python_allocator_threading PRIVATE src/rclpy)
+    target_link_libraries(test_python_allocator_threading PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_python_allocator_threading PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_python_allocator_threading PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_python_allocator_threading COMMAND test_python_allocator_threading)
+    add_test(NAME test_python_allocator_threading_debug COMMAND test_python_allocator_threading)
+    set_tests_properties(test_python_allocator_threading PROPERTIES TIMEOUT 60)
+    set_tests_properties(test_python_allocator_threading_debug PROPERTIES
+      TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
+
+    add_executable(test_events_task_ownership
+      test/test_events_task_ownership.cpp
+      src/rclpy/events_executor/events_queue.cpp)
+    target_include_directories(test_events_task_ownership PRIVATE src/rclpy)
+    target_link_libraries(test_events_task_ownership PRIVATE pybind11::embed Threads::Threads)
+    set_target_properties(test_events_task_ownership PROPERTIES
+      CXX_STANDARD 17
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_events_task_ownership PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    add_test(NAME test_events_task_ownership COMMAND test_events_task_ownership)
+    add_test(NAME test_events_task_ownership_debug COMMAND test_events_task_ownership)
+    set_tests_properties(test_events_task_ownership PROPERTIES TIMEOUT 60)
+    set_tests_properties(test_events_task_ownership_debug PROPERTIES
+      TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
+
+    add_executable(test_native_cleanup_warning
+      test/test_native_cleanup_warning.cpp src/rclpy/exceptions.cpp)
+    target_include_directories(test_native_cleanup_warning PRIVATE src/rclpy)
+    target_link_libraries(test_native_cleanup_warning PRIVATE
+      pybind11::embed rcl::rcl rcl_action::rcl_action Threads::Threads)
+    set_target_properties(test_native_cleanup_warning PROPERTIES
+      CXX_STANDARD 17 CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    if(WIN32)
+      target_compile_definitions(test_native_cleanup_warning PRIVATE Py_GIL_DISABLED=1)
+    endif()
+    if(MSVC)
+      target_compile_options(test_native_cleanup_warning PRIVATE /W4 /WX)
+    else()
+      target_compile_options(test_native_cleanup_warning PRIVATE -Wall -Wextra -Werror)
+    endif()
+    foreach(_cleanup_mode IN ITEMS error normal preserve foreign finalized)
+      add_test(NAME test_cleanup_warning_${_cleanup_mode}
+        COMMAND test_native_cleanup_warning ${_cleanup_mode})
+      add_test(NAME test_cleanup_warning_${_cleanup_mode}_debug
+        COMMAND test_native_cleanup_warning ${_cleanup_mode})
+      set_tests_properties(test_cleanup_warning_${_cleanup_mode} PROPERTIES TIMEOUT 60)
+      set_tests_properties(test_cleanup_warning_${_cleanup_mode}_debug PROPERTIES
+        TIMEOUT 60 ENVIRONMENT "PYTHONMALLOC=debug")
+    endforeach()
+
+  endif()
+
   if(NOT _typesupport_impls STREQUAL "")
     # Run each test in its own pytest invocation to isolate any global state in rclpy
     set(_rclpy_pytest_tests
@@ -177,17 +364,23 @@ if(BUILD_TESTING)
       test/test_callback_group.py
       test/test_client.py
       test/test_clock.py
+      test/test_clock_threading.py
       test/test_context.py
+      test/test_context_threading.py
       test/test_create_node.py
       test/test_create_while_spinning.py
       test/test_destruction.py
       test/test_events_executor.py
       test/test_executor.py
+      test/test_executor_cleanup.py
       test/test_expand_topic_name.py
       test/test_guard_condition.py
+      test/test_guard_condition_threading.py
       test/test_init_shutdown.py
+      test/test_signals_threading.py
       test/test_lifecycle.py
       test/test_logging.py
+      test/test_logging_threading.py
       test/test_logging_rosout.py
       test/test_logging_service.py
       test/test_messages.py

@@ -24,6 +24,7 @@
 #include <rcl_yaml_param_parser/parser.h>
 #include <rcutils/format_string.h>
 
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <regex>
@@ -35,6 +36,7 @@
 #include <rcpputils/find_and_replace.hpp>
 #include <rcpputils/scope_exit.hpp>
 
+#include "cleanup_warning.hpp"
 #include "exceptions.hpp"
 #include "logging.hpp"
 #include "node.hpp"
@@ -42,6 +44,30 @@
 
 namespace rclpy
 {
+namespace
+{
+void warn_node_cleanup(const char * action, const char * error) noexcept
+{
+#if PY_VERSION_HEX >= 0x030D0000
+  const bool attached = Py_IsInitialized() && PyThreadState_GetUnchecked() != nullptr;
+#else
+  const bool attached = Py_IsInitialized() && PyGILState_Check();
+#endif
+  if (attached) {
+    PyObject * type = nullptr;
+    PyObject * value = nullptr;
+    PyObject * traceback = nullptr;
+    PyErr_Fetch(&type, &value, &traceback);
+    if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1, "Failed to %s: %s", action, error) < 0) {
+      PyErr_WriteUnraisable(Py_None);
+    }
+    PyErr_Restore(type, value, traceback);
+  } else {
+    std::fprintf(stderr, "rclpy failed to %s: %s\n", action, error);
+  }
+}
+}  // namespace
+
 const char *
 Node::get_fully_qualified_name()
 {
@@ -158,32 +184,20 @@ Node::get_names_impl(bool get_enclaves)
     {
       rcutils_ret_t fini_ret = rcutils_string_array_fini(&node_names);
       if (RCUTILS_RET_OK != fini_ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level,
-          "[rclpy| %s : %s ]: failed to fini node names during error handling: %s",
-          RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "node names during error handling", rcl_get_error_string().str);
         rcl_reset_error();
       }
       fini_ret = rcutils_string_array_fini(&node_namespaces);
       if (RCUTILS_RET_OK != fini_ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level,
-          "[rclpy| %s : %s ]: failed to fini node namespaces during error handling: %s",
-          RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "node namespaces during error handling", rcl_get_error_string().str);
         rcl_reset_error();
       }
       fini_ret = rcutils_string_array_fini(&enclaves);
       if (RCUTILS_RET_OK != fini_ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level,
-          "[rclpy| %s : %s ]: failed to fini enclaves string array during error handling: %s",
-          RCUTILS_STRINGIFY(__FILE__), RCUTILS_STRINGIFY(__LINE__), rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "enclaves string array during error handling", rcl_get_error_string().str);
         rcl_reset_error();
       }
     });
@@ -414,34 +428,14 @@ Node::Node(
   rcl_ret_t ret;
   rcl_arguments_t arguments = rcl_get_zero_initialized_arguments();
 
-  // turn the arguments into an array of C-style strings
-  std::vector<const char *> arg_values;
-  const char ** const_arg_values = nullptr;
-  py::list pyargs;
-  if (!pycli_args.is_none()) {
-    pyargs = pycli_args;
-    if (!pyargs.empty()) {
-      arg_values.resize(pyargs.size());
-      for (size_t i = 0; i < pyargs.size(); ++i) {
-        // CPython owns const char * memory - no need to free it
-        arg_values[i] = PyUnicode_AsUTF8(pyargs[i].ptr());
-        if (!arg_values[i]) {
-          throw py::error_already_set();
-        }
-      }
-      const_arg_values = &(arg_values[0]);
-    }
-  }
+  CliArguments cli_arguments(pycli_args);
 
   // call rcl_parse_arguments() so rcl_arguments_t structure is always valid.
   // Otherwise the remapping functions will error if the user passes no arguments to a node and sets
   // use_global_arguments to False.
   rcl_allocator_t allocator = rcl_get_default_allocator();
-  if (arg_values.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-    throw py::value_error("too many cli arguments given to node");
-  }
-  int num_args = static_cast<int>(arg_values.size());
-  ret = rcl_parse_arguments(num_args, const_arg_values, allocator, &arguments);
+  ret = rcl_parse_arguments(
+    cli_arguments.argc(), cli_arguments.argv(), allocator, &arguments);
 
   if (RCL_RET_INVALID_ROS_ARGS == ret) {
     throw RCLInvalidROSArgsError("Failed to parse ROS arguments");
@@ -453,45 +447,51 @@ Node::Node(
   RCPPUTILS_SCOPE_EXIT(
     {
       if (RCL_RET_OK != rcl_arguments_fini(&arguments)) {
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini arguments: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "fini", "arguments", rcl_get_error_string().str);
         rcl_reset_error();
       }
     });
 
-  throw_if_unparsed_ros_args(pyargs, arguments);
+  throw_if_unparsed_ros_args(cli_arguments.snapshot(), arguments);
 
+  struct Initialization
+  {
+    bool node = false;
+    bool rosout = false;
+  };
+  auto initialized = std::make_shared<Initialization>();
+  auto native_context = context.rcl_handle();
   rcl_node_ = std::shared_ptr<rcl_node_t>(
     new rcl_node_t,
-    [enable_rosout](rcl_node_t * node)
+    [initialized, native_context](rcl_node_t * node)
     {
-      rcl_ret_t ret;
-      {
+      // The allocation itself retains its native context through SDK fini.
+      (void)native_context;
+      rcl_error_string_t rosout_error{};
+      rcl_error_string_t node_error{};
+      if (initialized->rosout) {
         rclpy::LoggingGuard scoped_logging_guard;
-        if (rcl_logging_rosout_enabled() && enable_rosout) {
-          ret = rcl_logging_rosout_fini_publisher_for_node(node);
-          if (ret != RCL_RET_OK) {
-            // Warning should use line number of the current stack frame
-            int stack_level = 1;
-            PyErr_WarnFormat(
-              PyExc_RuntimeWarning, stack_level, "Failed to fini rosout publisher: %s",
-              rcl_get_error_string().str);
+        if (rcl_logging_rosout_enabled()) {
+          if (rcl_logging_rosout_fini_publisher_for_node(node) != RCL_RET_OK) {
+            rosout_error = rcl_get_error_string();
             rcl_reset_error();
           }
         }
       }
-      ret = rcl_node_fini(node);
-      if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini node: %s",
-          rcl_get_error_string().str);
+      if (initialized->node && rcl_node_fini(node) != RCL_RET_OK) {
+        node_error = rcl_get_error_string();
         rcl_reset_error();
       }
       delete node;
+      // LoggingGuard has unlocked and restored Python state before warnings
+      // can run arbitrary Python warning handlers or trigger collection.
+      if (rosout_error.str[0]) {
+        warn_node_cleanup("fini rosout publisher", rosout_error.str);
+      }
+      if (node_error.str[0]) {
+        warn_node_cleanup("fini node", node_error.str);
+      }
     });
 
   *rcl_node_ = rcl_get_zero_initialized_node();
@@ -516,12 +516,16 @@ Node::Node(
   if (RCL_RET_OK != ret) {
     throw RCLError("error creating node");
   }
+  initialized->node = true;
 
-  if (rcl_logging_rosout_enabled() && enable_rosout) {
+  if (enable_rosout) {
     rclpy::LoggingGuard scoped_logging_guard;
-    ret = rcl_logging_rosout_init_publisher_for_node(rcl_node_.get());
-    if (ret != RCL_RET_OK) {
-      throw RCLError("failed to initialize rosout publisher");
+    if (rcl_logging_rosout_enabled()) {
+      ret = rcl_logging_rosout_init_publisher_for_node(rcl_node_.get());
+      if (ret != RCL_RET_OK) {
+        throw RCLError("failed to initialize rosout publisher");
+      }
+      initialized->rosout = true;
     }
   }
 }

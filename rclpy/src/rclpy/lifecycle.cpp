@@ -34,6 +34,7 @@
 #include <tuple>
 #include <vector>
 
+#include "cleanup_warning.hpp"
 #include "destroyable.hpp"
 #include "exceptions.hpp"
 #include "lifecycle.hpp"
@@ -57,13 +58,12 @@ public:
       [node](rcl_lifecycle_state_machine_t * state_machine) {
         rcl_ret_t ret = rcl_lifecycle_state_machine_fini(state_machine, node.rcl_ptr());
         if (RCL_RET_OK != ret) {
-          // Warning should use line number of the current stack frame
-          int stack_level = 1;
-          PyErr_WarnFormat(
-            PyExc_RuntimeWarning, stack_level, "Failed to fini lifecycle state machine: %s",
-            rcl_get_error_string().str);
+          rclpy::warn_cleanup_error(
+            "fini", "lifecycle state machine", rcl_get_error_string().str);
           rcl_reset_error();
         }
+        // The SDK fini releases internal members; this wrapper owns the allocation.
+        delete state_machine;
       });
     auto state_machine_options = rcl_lifecycle_get_default_state_machine_options();
     state_machine_options.enable_com_interface = enable_com_interface;

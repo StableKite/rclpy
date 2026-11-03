@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 
 #include "events_executor/events_queue.hpp"
@@ -58,20 +59,39 @@ public:
   /// MakeCallback().  Caution: ensure that RCL is no longer using a callback before invoking this.
   void RemoveCallback(const void * key);
 
+  /// Visit each distinct Python context owner while attached mutators are stopped.
+  int TraversePythonOwners(visitproc visit, void * arg) const;
+
 private:
+  // A queued event belongs to one registration, even if the RCL entity address
+  // is subsequently reused. Taking an invocation also leases its native owner
+  // until that already-started callback returns.
+  struct Invocation
+  {
+    std::function<void(size_t)> callback;
+    std::shared_ptr<ScopedWith> with;
+  };
+
+  struct CallbackState
+  {
+    std::mutex mutex;
+    std::shared_ptr<Invocation> invocation;
+  };
+
   /// The C RCL interface deals in raw pointers, so someone needs to own the C++ function objects
   /// we'll be calling into.  We use unique pointers so the raw pointer to the object remains
   /// stable while the map is manipulated.
   struct CbEntry
   {
     std::unique_ptr<std::function<void(size_t)>> cb;
-    std::shared_ptr<ScopedWith> with;
+    std::shared_ptr<CallbackState> state;
   };
 
   EventsQueue * const events_queue_;
 
   /// The map key is the raw pointer to the RCL entity object (subscription, etc) associated with
   /// the callback.
+  std::mutex callbacks_mutex_;
   std::unordered_map<const void *, CbEntry> owned_cbs_;
 };
 

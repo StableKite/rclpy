@@ -18,7 +18,10 @@
 #include <rcl/timer.h>
 #include <rcl/types.h>
 
+#include <atomic>
+#include <cstdio>
 #include <memory>
+#include <optional>
 
 #include "clock.hpp"
 #include "context.hpp"
@@ -27,50 +30,113 @@
 
 namespace rclpy
 {
+class TimerState
+{
+public:
+  TimerState(Clock & clock, Context & context)
+  : clock(clock), context(context.rcl_handle()) {}
+
+  ~TimerState()
+  {
+    if (!initialized) {
+      return;
+    }
+#if PY_VERSION_HEX >= 0x030D0000
+    const bool attached = PyThreadState_GetUnchecked() != nullptr;
+    const bool finalizing = Py_IsFinalizing() != 0;
+#else
+    const bool attached = PyGILState_Check() != 0;
+    const bool finalizing = _Py_IsFinalizing() != 0;
+#endif
+    // Normal fini shares the clock's registration guard. An interpreter that
+    // has already shut down cannot have live Python callback dispatchers.
+    std::optional<ClockMutation> guard;
+    if (attached || (Py_IsInitialized() && !finalizing)) {
+      guard.emplace(std::atomic_load(&clock.state_), true);
+    }
+    if (RCL_RET_OK != rcl_timer_fini(&timer)) {
+      if (guard) {
+        PyObject * type = nullptr;
+        PyObject * value = nullptr;
+        PyObject * traceback = nullptr;
+        PyErr_Fetch(&type, &value, &traceback);
+        if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1, "Failed to fini timer: %s",
+            rcl_get_error_string().str) < 0)
+        {
+          PyErr_WriteUnraisable(Py_None);
+        }
+        PyErr_Restore(type, value, traceback);
+      } else {
+        std::fprintf(stderr, "rclpy timer cleanup failed: %s\n", rcl_get_error_string().str);
+      }
+      rcl_reset_error();
+    }
+  }
+
+  // The resource object, rather than a shared_ptr deleter, owns these leases.
+  // Clock's weak timer registry must not keep a strong clock-owning deleter
+  // alive after the timer itself has been finalized.
+  Clock clock;
+  std::shared_ptr<rcl_context_t> context;
+  rcl_timer_t timer = rcl_get_zero_initialized_timer();
+  bool initialized = false;
+};
+
 void
 Timer::destroy()
 {
-  rcl_timer_.reset();
-  clock_.destroy();
-  context_.destroy();
+  std::atomic_store(&state_, std::shared_ptr<TimerState>());
 }
 
 Timer::Timer(
   Clock & clock, Context & context, int64_t period_nsec, bool autostart)
-: context_(context), clock_(clock)
 {
-  // Create a client
-  rcl_timer_ = std::shared_ptr<rcl_timer_t>(
-    new rcl_timer_t,
-    [](rcl_timer_t * timer)
-    {
-      rcl_ret_t ret = rcl_timer_fini(timer);
-      if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Failed to fini timer: %s",
-          rcl_get_error_string().str);
-      }
-      delete timer;
-    });
-
-  *rcl_timer_ = rcl_get_zero_initialized_timer();
-
+  auto state = std::make_shared<TimerState>(clock, context);
+  auto guard = state->clock.mutation();
+  // Allocate lifetime tracking before exposing the timer's internal callback
+  // to RCL; allocation failure must not require fini during SDK iteration.
+  guard.track_timer(state);
   rcl_allocator_t allocator = rcl_get_default_allocator();
-
   rcl_ret_t ret = rcl_timer_init2(
-    rcl_timer_.get(), clock_.rcl_ptr(), context.rcl_ptr(),
+    &state->timer, guard.rcl_ptr(), state->context.get(),
     period_nsec, NULL, allocator, autostart);
 
   if (RCL_RET_OK != ret) {
     throw RCLError("failed to create timer");
   }
+  state->initialized = true;
+  std::atomic_store(&state_, std::move(state));
+}
+
+Timer::Timer(const Timer & other)
+: Destroyable(other), std::enable_shared_from_this<Timer>(),
+  state_(std::atomic_load(&other.state_)) {}
+
+std::shared_ptr<rcl_timer_t> Timer::rcl_handle() const
+{
+  auto state = std::atomic_load(&state_);
+  if (!state) {
+    throw InvalidHandle("cannot use a destroyed timer");
+  }
+  return std::shared_ptr<rcl_timer_t>(state, &state->timer);
+}
+
+rcl_timer_t * Timer::rcl_ptr() const
+{
+  return rcl_handle().get();
 }
 
 void Timer::reset_timer()
 {
-  rcl_ret_t ret = rcl_timer_reset(rcl_timer_.get());
+  auto timer = rcl_handle();
+  rcl_ret_t ret;
+  {
+    // The native callback replacement transaction can wait for an in-flight
+    // callback. Keep the timer lease, but detach so a concurrent Python GC
+    // can stop this caller while the SDK mutex is held by another thread.
+    py::gil_scoped_release release;
+    ret = rcl_timer_reset(timer.get());
+  }
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to reset timer");
   }
@@ -78,8 +144,9 @@ void Timer::reset_timer()
 
 bool Timer::is_timer_ready()
 {
+  auto timer = rcl_handle();
   bool is_ready;
-  rcl_ret_t ret = rcl_timer_is_ready(rcl_timer_.get(), &is_ready);
+  rcl_ret_t ret = rcl_timer_is_ready(timer.get(), &is_ready);
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to check timer ready");
   }
@@ -88,7 +155,8 @@ bool Timer::is_timer_ready()
 
 void Timer::call_timer()
 {
-  rcl_ret_t ret = rcl_timer_call(rcl_timer_.get());
+  auto timer = rcl_handle();
+  rcl_ret_t ret = rcl_timer_call(timer.get());
   if (ret != RCL_RET_OK) {
     if (ret == RCL_RET_TIMER_CANCELED) {
       throw TimerCancelledError("Timer has been canceled");
@@ -100,8 +168,9 @@ void Timer::call_timer()
 
 void Timer::change_timer_period(int64_t period_nsec)
 {
+  auto timer = rcl_handle();
   int64_t old_period;
-  rcl_ret_t ret = rcl_timer_exchange_period(rcl_timer_.get(), period_nsec, &old_period);
+  rcl_ret_t ret = rcl_timer_exchange_period(timer.get(), period_nsec, &old_period);
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to exchange timer period");
   }
@@ -109,8 +178,9 @@ void Timer::change_timer_period(int64_t period_nsec)
 
 std::optional<int64_t> Timer::time_until_next_call()
 {
+  auto timer = rcl_handle();
   int64_t remaining_time;
-  rcl_ret_t ret = rcl_timer_get_time_until_next_call(rcl_timer_.get(), &remaining_time);
+  rcl_ret_t ret = rcl_timer_get_time_until_next_call(timer.get(), &remaining_time);
   if (ret == RCL_RET_TIMER_CANCELED) {
     return std::nullopt;
   } else if (ret != RCL_RET_OK) {
@@ -122,8 +192,9 @@ std::optional<int64_t> Timer::time_until_next_call()
 
 int64_t Timer::time_since_last_call()
 {
+  auto timer = rcl_handle();
   int64_t elapsed_time;
-  rcl_ret_t ret = rcl_timer_get_time_since_last_call(rcl_timer_.get(), &elapsed_time);
+  rcl_ret_t ret = rcl_timer_get_time_since_last_call(timer.get(), &elapsed_time);
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to get time since last timer call");
   }
@@ -133,8 +204,9 @@ int64_t Timer::time_since_last_call()
 
 int64_t Timer::get_timer_period()
 {
+  auto timer = rcl_handle();
   int64_t timer_period;
-  rcl_ret_t ret = rcl_timer_get_period(rcl_timer_.get(), &timer_period);
+  rcl_ret_t ret = rcl_timer_get_period(timer.get(), &timer_period);
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to get timer period");
   }
@@ -143,7 +215,8 @@ int64_t Timer::get_timer_period()
 
 void Timer::cancel_timer()
 {
-  rcl_ret_t ret = rcl_timer_cancel(rcl_timer_.get());
+  auto timer = rcl_handle();
+  rcl_ret_t ret = rcl_timer_cancel(timer.get());
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to cancel timer");
   }
@@ -151,8 +224,9 @@ void Timer::cancel_timer()
 
 bool Timer::is_timer_canceled()
 {
+  auto timer = rcl_handle();
   bool is_canceled;
-  rcl_ret_t ret = rcl_timer_is_canceled(rcl_timer_.get(), &is_canceled);
+  rcl_ret_t ret = rcl_timer_is_canceled(timer.get(), &is_canceled);
   if (ret != RCL_RET_OK) {
     throw RCLError("failed to check if timer is canceled");
   }

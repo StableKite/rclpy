@@ -12,15 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Protocol, Tuple, Union
+from typing import TYPE_CHECKING, Protocol, Tuple, Union, overload, cast
 
 import builtin_interfaces.msg
 
+from rclpy import native_types
 from rclpy.constants import S_TO_NS
 from rclpy.duration import Duration
 from rclpy.impl.implementation_singleton import rclpy_implementation as _rclpy
 
 from .clock_type import ClockType
+
+if TYPE_CHECKING:
+    from types import NotImplementedType
+else:
+    # Keep runtime annotation introspection available on older Python too.
+    NotImplementedType = type(NotImplemented)
 
 
 class TimeHandle(Protocol):
@@ -28,6 +35,12 @@ class TimeHandle(Protocol):
 
     nanoseconds: int
     clock_type: ClockType
+
+
+def _require_time_message(value: object) -> builtin_interfaces.msg.Time:
+    if not isinstance(value, builtin_interfaces.msg.Time):
+        raise TypeError('Must pass a builtin_interfaces.msg.Time object')
+    return value
 
 
 class Time:
@@ -43,9 +56,9 @@ class Time:
     def __init__(
         self, *,
         seconds: Union[int, float] = 0, nanoseconds: int = 0,
-        clock_type: ClockType = ClockType.SYSTEM_TIME
+        clock_type: ClockType | _rclpy.ClockType = ClockType.SYSTEM_TIME
     ) -> None:
-        if not isinstance(clock_type, (ClockType, _rclpy.ClockType)):
+        if not isinstance(cast(object, clock_type), (ClockType, _rclpy.ClockType)):
             raise TypeError('Clock type must be a ClockType enum')
         if seconds < 0:
             raise ValueError('Seconds value must not be negative')
@@ -57,7 +70,12 @@ class Time:
             # pybind11 would raise TypeError, but we want OverflowError
             raise OverflowError(
                 'Total nanoseconds value is too large to store in C time point.')
-        self._time_handle: TimeHandle = _rclpy.rcl_time_point_t(total_nanoseconds, clock_type)
+        self._time_handle: native_types.rcl_time_point_t = _rclpy.rcl_time_point_t(total_nanoseconds, clock_type)
+
+    @property
+    def handle(self) -> native_types.rcl_time_point_t:
+        """Return the internal native time point for use within rclpy."""
+        return self._time_handle
 
     @property
     def nanoseconds(self) -> int:
@@ -74,7 +92,7 @@ class Time:
         return (nanoseconds // S_TO_NS, nanoseconds % S_TO_NS)
 
     @property
-    def clock_type(self) -> ClockType:
+    def clock_type(self) -> _rclpy.ClockType:
         """:return: the type of clock that produced this instance."""
         return self._time_handle.clock_type
 
@@ -82,7 +100,13 @@ class Time:
         return 'Time(nanoseconds={0}, clock_type={1})'.format(
             self.nanoseconds, self.clock_type.name)
 
-    def __add__(self, other: Duration) -> 'Time':
+    @overload
+    def __add__(self, other: Duration) -> 'Time': ...
+
+    @overload
+    def __add__(self, other: object) -> Union['Time', 'NotImplementedType']: ...
+
+    def __add__(self, other: object) -> Union['Time', 'NotImplementedType']:
         if isinstance(other, Duration):
             try:
                 return Time(
@@ -96,7 +120,16 @@ class Time:
     def __radd__(self, other: Duration) -> 'Time':
         return self.__add__(other)
 
-    def __sub__(self, other: Union['Time', Duration]) -> Union['Time', Duration]:
+    @overload
+    def __sub__(self, other: 'Time') -> Duration: ...
+
+    @overload
+    def __sub__(self, other: Duration) -> 'Time': ...
+
+    @overload
+    def __sub__(self, other: object) -> Union['Time', Duration, 'NotImplementedType']: ...
+
+    def __sub__(self, other: object) -> Union['Time', Duration, 'NotImplementedType']:
         if isinstance(other, Time):
             if self.clock_type != other.clock_type:
                 raise TypeError("Can't subtract times with different clock types")
@@ -166,7 +199,7 @@ class Time:
     @classmethod
     def from_msg(
         cls, msg: builtin_interfaces.msg.Time,
-        clock_type: ClockType = ClockType.ROS_TIME
+        clock_type: ClockType | _rclpy.ClockType = ClockType.ROS_TIME
     ) -> 'Time':
         """
         Create a ``Time`` instance from a ROS message.
@@ -175,6 +208,5 @@ class Time:
         :type msg: builtin_interfaces.msg.Time
         :rtype: Time
         """
-        if not isinstance(msg, builtin_interfaces.msg.Time):
-            raise TypeError('Must pass a builtin_interfaces.msg.Time object')
+        msg = _require_time_message(msg)
         return cls(seconds=msg.sec, nanoseconds=msg.nanosec, clock_type=clock_type)

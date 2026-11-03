@@ -21,6 +21,7 @@
 
 #include <memory>
 
+#include "cleanup_warning.hpp"
 #include "action_goal_handle.hpp"
 #include "action_server.hpp"
 #include "exceptions.hpp"
@@ -54,11 +55,8 @@ ActionGoalHandle::ActionGoalHandle(
     {
       rcl_ret_t ret = rcl_action_goal_handle_fini(goal_handle);
       if (RCL_RET_OK != ret) {
-        // Warning should use line number of the current stack frame
-        int stack_level = 1;
-        PyErr_WarnFormat(
-          PyExc_RuntimeWarning, stack_level, "Error destroying action goal handle: %s",
-          rcl_get_error_string().str);
+        rclpy::warn_cleanup_error(
+          "destroy", "action goal handle", rcl_get_error_string().str);
         rcl_reset_error();
       }
       delete goal_handle;
