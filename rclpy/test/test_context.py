@@ -19,6 +19,7 @@ import threading
 import pytest
 from rclpy.context import Context
 from rclpy.exceptions import InvalidHandle
+from rclpy.impl.implementation_singleton import rclpy_implementation
 from rclpy.node import Node
 
 
@@ -139,9 +140,17 @@ def test_shutdown_destroys_all_tracked_nodes() -> None:
 @pytest.mark.skipif(sys.platform == 'win32', reason='requires POSIX signal delivery')
 def test_signal_shutdown_after_context_destruction() -> None:
     subprocess.run([sys.executable, '-c', '''
+from importlib import import_module
 import os
 import signal
+import sys
 import time
+
+# CTest loads the extension from the build tree under the test_rclpy package.
+# Use the same module in this child before importing the public package.
+native_module = 'rclpy._rclpy_pybind11'
+if sys.argv[1] != native_module:
+    sys.modules[native_module] = import_module(sys.argv[1])
 
 from rclpy.context import Context
 from rclpy.signals import SignalHandlerOptions, install_signal_handlers, uninstall_signal_handlers
@@ -163,4 +172,4 @@ try:
     live.destroy()
 finally:
     uninstall_signal_handlers()
-'''], check=True, timeout=15)
+''', rclpy_implementation.__name__], check=True, timeout=15)
