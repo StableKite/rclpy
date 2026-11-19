@@ -52,6 +52,7 @@ class Context(ContextManager['Context']):
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._callbacks_lock = threading.Lock()
         self._callbacks: List[Union['weakref.WeakMethod[MethodType]', Callable[[], None]]] = []
         self._logging_initialized = False
         self.__context: Optional[_rclpy.Context] = None
@@ -141,11 +142,13 @@ class Context(ContextManager['Context']):
                 return self.__context.ok()
 
     def _call_on_shutdown_callbacks(self) -> None:
-        for weak_method in self._callbacks:
-            callback = weak_method()
+        with self._callbacks_lock:
+            callbacks, self._callbacks = self._callbacks, []
+
+        for registered in callbacks:
+            callback = registered() if isinstance(registered, weakref.WeakMethod) else registered
             if callback is not None:
                 callback()
-        self._callbacks = []
 
     def _cleanup(self) -> None:
         # Iterate over a copy of the list, because BaseNode.destroy_node() calls
@@ -178,25 +181,24 @@ class Context(ContextManager['Context']):
                 self._cleanup()
 
     def _remove_callback(self, weak_method: 'weakref.WeakMethod[MethodType]') -> None:
-        self._callbacks.remove(weak_method)
+        with self._callbacks_lock:
+            for index, registered in enumerate(self._callbacks):
+                if registered is weak_method:
+                    del self._callbacks[index]
+                    break
 
     def on_shutdown(self, callback: Callable[[], None]) -> None:
         """Add a callback to be called on shutdown."""
         if not callable(callback):
             raise TypeError('callback should be a callable, got {}', type(callback))
 
-        if self.__context is None:
-            with self._lock:
-                if ismethod(callback):
-                    self._callbacks.append(weakref.WeakMethod(callback, self._remove_callback))
-                else:
-                    self._callbacks.append(callback)
-            return
-
-        with self.__context, self._lock:
-            if not self.__context.ok():
-                callback()
-            else:
+        with self._lock:
+            if self.__context is not None:
+                with self.__context:
+                    if not self.__context.ok():
+                        callback()
+                        return
+            with self._callbacks_lock:
                 if ismethod(callback):
                     self._callbacks.append(weakref.WeakMethod(callback, self._remove_callback))
                 else:

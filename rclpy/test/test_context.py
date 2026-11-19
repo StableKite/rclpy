@@ -14,6 +14,7 @@
 
 import subprocess
 import sys
+import threading
 
 import pytest
 from rclpy.context import Context
@@ -60,6 +61,43 @@ def test_on_shutdown_function() -> None:
     assert not context.ok()
 
     assert callback_called
+
+
+def test_shutdown_callbacks_survive_concurrent_receiver_cleanup() -> None:
+    context = Context()
+    context.init()
+    calls = []
+    release_receiver = threading.Event()
+    receiver_released = threading.Event()
+
+    class Receiver:
+
+        def callback(self):
+            calls.append('receiver')
+
+    receivers = [Receiver()]
+    context.on_shutdown(receivers[0].callback)
+
+    def drop_receiver():
+        assert release_receiver.wait(timeout=5)
+        receivers.clear()
+        receiver_released.set()
+
+    def drop_during_shutdown():
+        release_receiver.set()
+        assert receiver_released.wait(timeout=5)
+
+    context.on_shutdown(drop_during_shutdown)
+    context.on_shutdown(lambda: calls.append('last'))
+    cleanup = threading.Thread(target=drop_receiver)
+    cleanup.start()
+    try:
+        context.shutdown()
+        assert calls == ['receiver', 'last']
+    finally:
+        release_receiver.set()
+        cleanup.join(timeout=5)
+        assert not cleanup.is_alive()
 
 
 def test_context_manager() -> None:
