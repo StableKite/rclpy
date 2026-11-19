@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from typing import TYPE_CHECKING
 import unittest
 
 import rclpy
 import rclpy.context
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.signals import SignalHandlerGuardCondition
 
 
 class TestGuardCondition(unittest.TestCase):
@@ -94,6 +97,24 @@ class TestGuardCondition(unittest.TestCase):
 
         self.node.destroy_guard_condition(gc1)
         self.node.destroy_guard_condition(gc2)
+
+    def test_concurrent_signal_guard_registration(self) -> None:
+        workers = 8
+        ready = Barrier(workers, timeout=20)
+
+        def change_registration() -> None:
+            for _ in range(15):
+                ready.wait()
+                guard = SignalHandlerGuardCondition(context=self.context)
+                try:
+                    ready.wait()
+                finally:
+                    guard.destroy()
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(change_registration) for _ in range(workers)]
+            for future in futures:
+                future.result(timeout=90)
 
 
 if __name__ == '__main__':

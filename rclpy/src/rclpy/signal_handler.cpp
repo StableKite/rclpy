@@ -16,11 +16,11 @@
 
 #include <pybind11/pybind11.h>
 
-#include <rcl/allocator.h>
 #include <rcl/error_handling.h>
 #include <rcl/guard_condition.h>
 #include <rcutils/logging_macros.h>
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <list>
@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "context.hpp"
 #include "guard_condition.hpp"
@@ -44,7 +45,7 @@
 
 namespace py = pybind11;
 
-static bool trigger_guard_conditions();
+static void trigger_guard_conditions();
 static void invoke_callbacks();
 
 namespace
@@ -394,167 +395,56 @@ register_sigterm_signal_handler()
     install_signal_handler(SIGTERM, get_rclpy_sigterm_handler());
 }
 
-/// Global reference to guard conditions
-/// End with sentinel value instead of count to avoid mismatch if signal
-/// interrupts while adding or removing from the list
-std::atomic<rcl_guard_condition_t **> g_guard_conditions;
+// The actual signal handler only wakes the deferred thread. The deferred
+// thread and Python callers can serialize access to the registry normally.
+static std::mutex g_guard_conditions_mutex;
+static std::vector<rcl_guard_condition_t *> g_guard_conditions;
 
-/// Trigger all registered guard conditions
-/**
- * This triggers guard conditions when a signal is received.
- * These wake executors currently blocked in `rcl_wait`.
- * Returns True if at least one guard condition was triggered.
- */
-static bool
+/** Trigger the guard conditions that wake executors blocked in rcl_wait. */
+static void
 trigger_guard_conditions()
 {
-  rcl_guard_condition_t ** guard_conditions = g_guard_conditions.load();
-  if (!guard_conditions || !guard_conditions[0]) {
-    return false;
-  }
-
-  rcl_guard_condition_t ** pgc = guard_conditions;
-  // Trigger python signal handlers
-  while (NULL != *pgc) {
-    rcl_ret_t ret = rcl_trigger_guard_condition(*pgc);
+  std::lock_guard<std::mutex> lock(g_guard_conditions_mutex);
+  for (auto * guard_condition : g_guard_conditions) {
+    rcl_ret_t ret = rcl_trigger_guard_condition(guard_condition);
     if (ret != RCL_RET_OK) {
       RCUTILS_LOG_ERROR_NAMED(
         "rclpy.signals",
         "rcl_trigger_guard_condition() failed: %s", rcutils_get_error_string().str);
       rcl_reset_error();
     }
-    ++pgc;
   }
-  return true;
 }
 
 namespace rclpy
 {
-/// Warn if getting g_guard_conditions could deadlock the signal handler
-void
-check_signal_safety()
-{
-  static bool did_warn = false;
-  if (!did_warn && !g_guard_conditions.is_lock_free()) {
-    did_warn = true;
-    const char * deadlock_msg =
-      "Global guard condition list access is not lock-free on this platform."
-      "The program may deadlock when receiving SIGINT.";
-    if (PyErr_WarnEx(PyExc_ResourceWarning, deadlock_msg, 1)) {
-      throw py::error_already_set();
-    }
-  }
-}
-
 /// Register a guard condition to be triggered when SIGINT is received.
-/**
- * Raises ValueError if the argument was already registered
- *
- * \param[in] guard_condition a guard condition
- * \return None
- */
 void
 register_sigint_guard_condition(const GuardCondition & guard_condition)
 {
-  check_signal_safety();
-
-  rcl_guard_condition_t * gc = guard_condition.rcl_ptr();
-  rcl_guard_condition_t ** guard_conditions = g_guard_conditions.load();
-
-  // Figure out how big the list currently is
-  size_t count_gcs = 0;
-  if (NULL != guard_conditions) {
-    while (NULL != guard_conditions[count_gcs]) {
-      if (gc == guard_conditions[count_gcs]) {
-        throw py::value_error("Guard condition was already registered");
-      }
-      ++count_gcs;
-    }
+  auto * gc = guard_condition.rcl_ptr();
+  std::lock_guard<std::mutex> lock(g_guard_conditions_mutex);
+  if (std::find(g_guard_conditions.begin(), g_guard_conditions.end(), gc) !=
+    g_guard_conditions.end())
+  {
+    throw py::value_error("Guard condition was already registered");
   }
 
-  // Current size of guard condition list: count_gcs + 1 (sentinel value)
-  // Allocate space for one more guard condition: count_cs + 1 (new gc) + 1 (sentinel value)
-  rcl_allocator_t allocator = rcl_get_default_allocator();
-  auto new_gcs = static_cast<rcl_guard_condition_t **>(
-    allocator.allocate(sizeof(rcl_guard_condition_t *) * (count_gcs + 2), allocator.state));
-
-  // populate the new guard condition list, ending with a sentinel of NULL
-  for (size_t i = 0; i < count_gcs; ++i) {
-    new_gcs[i] = guard_conditions[i];
-  }
-  new_gcs[count_gcs] = gc;
-  new_gcs[count_gcs + 1] = NULL;
-
-  // Swap the lists and free the old
-  rcl_guard_condition_t ** old_gcs = g_guard_conditions.exchange(new_gcs);
-  if (NULL != old_gcs) {
-    allocator.deallocate(old_gcs, allocator.state);
-  }
+  g_guard_conditions.push_back(gc);
 }
 
-/// Unregister a guard condition so it is not triggered when SIGINT is received.
-/**
- * Raises ValueError if the argument was not registered
- *
- * \param[in] guard_condition a guard condition
- * \return None
- */
+/// Unregister a guard condition before its owner destroys it.
 void
 unregister_sigint_guard_condition(const GuardCondition & guard_condition)
 {
-  rcl_guard_condition_t * gc = guard_condition.rcl_ptr();
-  rcl_guard_condition_t ** guard_conditions = g_guard_conditions.load();
-
-  // Figure out how big the list currently is
-  size_t count_gcs = 0;
-  bool found_gc = false;
-  // assumes guard condition was only added to list once
-  size_t found_index = 0;
-
-  if (NULL != guard_conditions) {
-    while (NULL != guard_conditions[count_gcs]) {
-      if (gc == guard_conditions[count_gcs]) {
-        found_gc = true;
-        found_index = count_gcs;
-      }
-      ++count_gcs;
-    }
-  }
-
-  if (!found_gc) {
+  auto * gc = guard_condition.rcl_ptr();
+  std::lock_guard<std::mutex> lock(g_guard_conditions_mutex);
+  auto entry = std::find(g_guard_conditions.begin(), g_guard_conditions.end(), gc);
+  if (entry == g_guard_conditions.end()) {
     throw py::value_error("Guard condition was not registered");
   }
 
-  rcl_allocator_t allocator = rcl_get_default_allocator();
-
-  if (count_gcs == 1) {
-    // Just delete the list if there are no guard conditions left
-    rcl_guard_condition_t ** old_gcs = g_guard_conditions.exchange(NULL);
-    allocator.deallocate(old_gcs, allocator.state);
-  } else {
-    // Create space for one less guard condition
-    // current list size: count_gcs + 1 (sentinel)
-    // new list size: count_gcs - 1 (removing a guard condition) + 1 (sentinel)
-    rcl_allocator_t allocator = rcl_get_default_allocator();
-    auto new_gcs = static_cast<rcl_guard_condition_t **>(
-      allocator.allocate(sizeof(rcl_guard_condition_t *) * (count_gcs), allocator.state));
-
-    // Put remaining guard conditions in the list, ending with a sentinel of NULL
-    for (size_t i = 0; i < found_index; ++i) {
-      new_gcs[i] = guard_conditions[i];
-    }
-    // one less guard condition
-    --count_gcs;
-    for (size_t i = found_index; i < count_gcs; ++i) {
-      new_gcs[i] = guard_conditions[i + 1];
-    }
-    // Put sentinel at end
-    new_gcs[count_gcs] = NULL;
-
-    // Replace guard condition list
-    rcl_guard_condition_t ** old_gcs = g_guard_conditions.exchange(new_gcs);
-    allocator.deallocate(old_gcs, allocator.state);
-  }
+  g_guard_conditions.erase(entry);
 }
 
 /// Enum to indicate which signal handlers to install.
@@ -615,10 +505,6 @@ uninstall_signal_handlers()
 }
 
 // Storage for signal callbacks.
-// TODO(bmartin427) The management of g_guard_conditions seems overly complex.  That variable is
-// never touched directly from a signal handler as it has a separate thread on which the guard
-// conditions are triggered; however, there's an awful lot of code jumping through hoops that seem
-// unnecessary with that in mind.  I won't model the same behavior for the registered callbacks.
 std::list<std::function<void()>> g_callbacks;
 std::mutex g_callback_mutex;
 class ScopedSignalCallback::Impl
