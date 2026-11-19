@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import time
 import unittest
 from unittest.mock import Mock
@@ -20,6 +22,7 @@ import rclpy
 from rclpy.clock import BaseClock, Clock
 from rclpy.clock import ClockChange
 from rclpy.clock import JumpThreshold
+from rclpy.clock import TimeJump
 from rclpy.clock_type import ClockType
 from rclpy.duration import Duration
 from rclpy.parameter import Parameter
@@ -261,3 +264,48 @@ class TestTimeSource(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def test_attach_clock_during_clock_sample() -> None:
+    source = TimeSource()
+    source.ros_time_is_active = True
+    first = Clock(clock_type=ClockType.ROS_TIME)
+    second = Clock(clock_type=ClockType.ROS_TIME)
+    source.attach_clock(first)
+    in_callback = threading.Event()
+    attached = threading.Event()
+
+    def wait_for_attach(_: TimeJump) -> None:
+        in_callback.set()
+        assert attached.wait(timeout=5)
+
+    def attach_clock() -> None:
+        try:
+            assert in_callback.wait(timeout=5)
+            source.attach_clock(second)
+        finally:
+            attached.set()
+
+    threshold = JumpThreshold(min_forward=Duration(nanoseconds=1), min_backward=None)
+    message = rosgraph_msgs.msg.Clock()
+    message.clock.sec = 10
+    with first.create_jump_callback(threshold, post_callback=wait_for_attach):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            attachment = pool.submit(attach_clock)
+            source.clock_callback(message)
+            attachment.result(timeout=5)
+
+    assert first.now() == second.now()
+    assert second.now().nanoseconds == 10_000_000_000
+
+
+def test_attach_clock_from_ros_time_activation_callback() -> None:
+    source = TimeSource()
+    first = Clock(clock_type=ClockType.ROS_TIME)
+    second = Clock(clock_type=ClockType.ROS_TIME)
+    source.attach_clock(first)
+    threshold = JumpThreshold(min_forward=None, min_backward=None, on_clock_change=True)
+    with first.create_jump_callback(threshold, post_callback=lambda _: source.attach_clock(second)):
+        source.ros_time_is_active = True
+    assert first.ros_time_is_active
+    assert second.ros_time_is_active

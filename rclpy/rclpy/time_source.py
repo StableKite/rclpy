@@ -53,7 +53,8 @@ class TimeSource:
         if self._ros_time_is_active == enabled:
             return
         self._ros_time_is_active = enabled
-        for clock in self._associated_clocks:
+        # Time-jump callbacks can attach a clock during this update.
+        for clock in self._associated_clocks.copy():
             clock._set_ros_time_is_active(enabled)
         if enabled:
             self._subscribe_to_clock_topic()
@@ -119,7 +120,8 @@ class TimeSource:
         # Cache the last message in case a new clock is attached.
         time_from_msg = Time.from_msg(msg.clock)
         self._last_time_set = time_from_msg
-        for clock in self._associated_clocks:
+        # Time-jump callbacks can attach a clock during this update.
+        for clock in self._associated_clocks.copy():
             clock.set_ros_time_override(time_from_msg)
 
     def _on_parameter_event(self, parameter_list: List[Parameter[bool]]) -> SetParametersResult:
