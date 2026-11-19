@@ -17,6 +17,8 @@
 
 #include <pybind11/pybind11.h>
 
+#include <mutex>
+
 namespace py = pybind11;
 
 namespace rclpy
@@ -52,8 +54,12 @@ public:
   ~Destroyable() = default;
 
 private:
+  // Protect only these lifecycle fields. Resource cleanup and Python APIs must
+  // run after this mutex is released, including cleanup from __exit__.
+  std::mutex lifecycle_mutex_;
   size_t use_count = 0u;
   bool please_destroy_ = false;
+  bool destroy_started_ = false;
 };
 
 /// Define a pybind11 wrapper for an rclpy::Destroyable

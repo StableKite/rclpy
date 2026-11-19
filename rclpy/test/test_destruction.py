@@ -14,6 +14,7 @@
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import rclpy
@@ -190,6 +191,44 @@ def test_destroy_publisher_asap() -> None:
             with pytest.raises(InvalidHandle):
                 # handle invalid because it was destroyed when no one was using it
                 with pub.handle:
+                    pass
+        finally:
+            node.destroy_node()
+    finally:
+        rclpy.shutdown(context=context)
+
+
+def test_destroy_publisher_waits_for_concurrent_handle_users() -> None:
+    context = rclpy.context.Context()
+    rclpy.init(context=context)
+    try:
+        node = rclpy.create_node('test_concurrent_publisher_destruction', context=context)
+        try:
+            publisher = node.create_publisher(BasicTypes, 'held_topic', 1)
+            handle = publisher.handle
+            ready = threading.Barrier(9)
+            release = threading.Event()
+
+            def use_handle() -> str:
+                with handle:
+                    ready.wait(timeout=10)
+                    assert release.wait(timeout=10)
+                    return handle.get_topic_name()
+
+            with ThreadPoolExecutor(max_workers=8) as workers:
+                active = [workers.submit(use_handle) for _ in range(8)]
+                try:
+                    ready.wait(timeout=10)
+                    assert node.destroy_publisher(publisher)
+                    with pytest.raises(InvalidHandle):
+                        with handle:
+                            pass
+                finally:
+                    release.set()
+                assert [call.result(timeout=10) for call in active] == ['/held_topic'] * 8
+
+            with pytest.raises(InvalidHandle):
+                with handle:
                     pass
         finally:
             node.destroy_node()
