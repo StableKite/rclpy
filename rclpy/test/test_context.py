@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
+import sys
+
 import pytest
 from rclpy.context import Context
 from rclpy.exceptions import InvalidHandle
@@ -93,3 +96,33 @@ def test_shutdown_destroys_all_tracked_nodes() -> None:
             # handle invalid because it was destroyed by Context.shutdown()
             with node.handle:
                 pass
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='requires POSIX signal delivery')
+def test_signal_shutdown_after_context_destruction() -> None:
+    subprocess.run([sys.executable, '-c', '''
+import os
+import signal
+import time
+
+from rclpy.context import Context
+from rclpy.signals import SignalHandlerOptions, install_signal_handlers, uninstall_signal_handlers
+
+signal.signal(signal.SIGINT, lambda *_: None)
+install_signal_handlers(SignalHandlerOptions.SIGINT)
+try:
+    retired = Context()
+    retired.init(args=[], initialize_logging=False)
+    retired.destroy()
+
+    live = Context()
+    live.init(args=[], initialize_logging=False)
+    os.kill(os.getpid(), signal.SIGINT)
+    deadline = time.monotonic() + 5
+    while live.ok() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not live.ok()
+    live.destroy()
+finally:
+    uninstall_signal_handlers()
+'''], check=True, timeout=15)

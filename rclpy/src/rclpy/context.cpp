@@ -52,12 +52,20 @@ void shutdown_contexts()
   g_contexts.clear();
 }
 
-Context::Context(py::list pyargs, size_t domain_id)
+Context::Context(py::list args, size_t domain_id)
 {
   rcl_context_ = std::shared_ptr<rcl_context_t>(
-    new rcl_context_t,
+    new rcl_context_t(rcl_get_zero_initialized_context()),
     [](rcl_context_t * context)
     {
+      {
+        // Signal-driven shutdown can only use the context while it is registered.
+        std::lock_guard<std::mutex> guard{g_contexts_mutex};
+        auto iter = std::find(g_contexts.begin(), g_contexts.end(), context);
+        if (iter != g_contexts.end()) {
+          g_contexts.erase(iter);
+        }
+      }
       if (NULL != context->impl) {
         rcl_ret_t ret;
         if (rcl_context_is_valid(context)) {
@@ -86,9 +94,12 @@ Context::Context(py::list pyargs, size_t domain_id)
       }
       delete context;
     });
-  *rcl_context_ = rcl_get_zero_initialized_context();
-
   // turn the arguments into an array of C-style strings
+  // The copied list keeps each UTF-8 pointer valid throughout rcl_init().
+  auto pyargs = py::reinterpret_steal<py::list>(PyList_GetSlice(args.ptr(), 0, PY_SSIZE_T_MAX));
+  if (!pyargs) {
+    throw py::error_already_set();
+  }
   std::vector<const char *> arg_c_values(pyargs.size());
   for (size_t i = 0; i < pyargs.size(); ++i) {
     // CPython owns const char * memory - no need to free it
