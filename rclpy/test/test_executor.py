@@ -22,6 +22,7 @@ from typing import Optional
 from typing import Protocol
 from typing import Set
 import unittest
+from unittest.mock import patch
 import warnings
 
 import rclpy
@@ -518,6 +519,32 @@ class TestExecutor(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as cm:
                     executor.spin_until_future_complete(task, timeout_sec=5)
                 self.assertIn('Expected error after await', str(cm.exception))
+
+    def test_multithreaded_executor_reports_already_finished_task_error(self) -> None:
+        executor = MultiThreadedExecutor(num_threads=2, context=self.context)
+        self.addCleanup(executor.shutdown)
+        resume = threading.Event()
+        finished = threading.Event()
+
+        def fail() -> None:
+            assert resume.wait(timeout=5)
+            raise RuntimeError('worker error')
+
+        task = executor.create_task(fail)
+        set_exception = task.set_exception
+
+        def notify(exception: Exception) -> None:
+            set_exception(exception)
+            finished.set()
+
+        with patch.object(task, 'set_exception', notify):
+            executor.spin_once(timeout_sec=5)
+            resume.set()
+            self.assertTrue(finished.wait(timeout=5))
+
+        with self.assertRaisesRegex(RuntimeError, 'worker error'):
+            executor.spin_until_future_complete(task, timeout_sec=5)
+        executor.spin_once(timeout_sec=0)
 
     def test_cancel_task_while_awaiting_future(self) -> None:
         """Cancelling a task parked on a future must not crash the dispatch loop."""

@@ -1219,15 +1219,28 @@ class MultiThreadedExecutor(Executor):
             pass
         else:
             self._executor.submit(handler)
-            self._futures.append(handler)
             with self._futures_lock:
-                for future in self._futures:
-                    if future.done():
-                        self._futures.remove(future)
-                        future.result()  # raise any exceptions
+                if handler not in self._futures:
+                    self._futures.append(handler)
 
             # Yield GIL so executor threads have a chance to run.
             os.sched_yield() if hasattr(os, 'sched_yield') else time.sleep(0)
+        self._raise_finished_tasks()
+
+    def _raise_finished_tasks(self) -> None:
+        with self._futures_lock:
+            for task in self._futures.copy():
+                if task.done():
+                    self._futures.remove(task)
+                    task.result()  # raise any exceptions
+
+    def spin_until_future_complete(
+        self, future: Future[Any], timeout_sec: Optional[float] = None
+    ) -> None:
+        """Spin until completion and report exceptions from finished callbacks."""
+        super().spin_until_future_complete(future, timeout_sec)
+        # The waited-on task can finish between the last spin and its loop's exit check.
+        self._raise_finished_tasks()
 
     def spin_once(self, timeout_sec: Optional[float] = None) -> None:
         # Mark executor as spinning to prevent concurrent spins
