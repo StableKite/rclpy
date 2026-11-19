@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from threading import RLock
 from typing import Optional, TYPE_CHECKING
 
 from rclpy.exceptions import InvalidHandle
@@ -52,9 +53,12 @@ def uninstall_signal_handlers() -> None:
 class SignalHandlerGuardCondition(GuardCondition):
 
     def __init__(self, context: 'Optional[Context]' = None) -> None:
+        self._registration_lock = RLock()
+        self._registered = False
         super().__init__(callback=None, callback_group=None, context=context)
         with self.handle:
             _rclpy.register_sigint_guard_condition(self.handle)
+            self._registered = True
 
     def __del__(self) -> None:
         try:
@@ -67,6 +71,11 @@ class SignalHandlerGuardCondition(GuardCondition):
             pass
 
     def destroy(self) -> None:
-        with self.handle:
-            _rclpy.unregister_sigint_guard_condition(self.handle)
-        super().destroy()
+        # The executor, the guard finalizer and explicit callers may all clean up.
+        with self._registration_lock:
+            if not self._registered:
+                return
+            with self.handle:
+                _rclpy.unregister_sigint_guard_condition(self.handle)
+                self._registered = False
+                super().destroy()

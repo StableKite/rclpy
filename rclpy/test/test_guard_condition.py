@@ -19,6 +19,7 @@ import unittest
 
 import rclpy
 import rclpy.context
+from rclpy.exceptions import InvalidHandle
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.signals import SignalHandlerGuardCondition
 
@@ -115,6 +116,24 @@ class TestGuardCondition(unittest.TestCase):
             futures = [pool.submit(change_registration) for _ in range(workers)]
             for future in futures:
                 future.result(timeout=90)
+
+    def test_signal_guard_destroy_is_idempotent(self) -> None:
+        guard = SignalHandlerGuardCondition(context=self.context)
+        workers = 8
+        ready = Barrier(workers, timeout=20)
+
+        def destroy() -> None:
+            ready.wait()
+            guard.destroy()
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(destroy) for _ in range(workers)]
+            for future in futures:
+                future.result(timeout=30)
+
+        guard.destroy()
+        with self.assertRaises(InvalidHandle):
+            guard.trigger()
 
 
 if __name__ == '__main__':
