@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import time
 import unittest
+from unittest.mock import patch
 
 import rclpy
 from rclpy.clock import Clock
@@ -107,14 +108,18 @@ class TestLogging(unittest.TestCase):
     def test_log_throttle(self) -> None:
         message_was_logged = []
         system_clock = Clock()
-        for i in range(5):
-            message_was_logged.append(rclpy.logging._root_logger.log(
-                'message_' + inspect.stack()[0][3] + '_' + str(i),
-                LoggingSeverity.INFO,
-                throttle_duration_sec=1,
-                throttle_time_source_type=system_clock,
-            ))
-            time.sleep(0.4)
+        readings = (
+            Time(seconds=1, nanoseconds=i * 400_000_000, clock_type=system_clock.clock_type)
+            for i in range(5)
+        )
+        with patch.object(system_clock, 'now', side_effect=readings):
+            for i in range(5):
+                message_was_logged.append(rclpy.logging._root_logger.log(
+                    f'throttled message {i}',
+                    LoggingSeverity.INFO,
+                    throttle_duration_sec=1,
+                    throttle_time_source_type=system_clock,
+                ))
         self.assertEqual(
             message_was_logged, [
                 True,  # t=0, not throttled
@@ -183,15 +188,19 @@ class TestLogging(unittest.TestCase):
         # evaluated/updated, then the skip_first condition
         message_was_logged = []
         system_clock = Clock()
-        for i in range(5):
-            message_was_logged.append(rclpy.logging._root_logger.log(
-                'message_' + inspect.stack()[0][3] + '_' + str(i),
-                LoggingSeverity.INFO,
-                skip_first=True,
-                throttle_duration_sec=1,
-                throttle_time_source_type=system_clock,
-            ))
-            time.sleep(0.4)
+        readings = (
+            Time(seconds=1, nanoseconds=i * 400_000_000, clock_type=system_clock.clock_type)
+            for i in range(5)
+        )
+        with patch.object(system_clock, 'now', side_effect=readings):
+            for i in range(5):
+                message_was_logged.append(rclpy.logging._root_logger.log(
+                    f'throttled skip-first message {i}',
+                    LoggingSeverity.INFO,
+                    skip_first=True,
+                    throttle_duration_sec=1,
+                    throttle_time_source_type=system_clock,
+                ))
         self.assertEqual(
             message_was_logged, [
                 False,  # t=0, not throttled, but skipped because first
