@@ -23,15 +23,12 @@ namespace py = pybind11;
 #include <rcl_logging_interface/rcl_logging_interface.h>
 #include <rcl/logging_rosout.h>
 
-#include <mutex>
 #include <stdexcept>
 #include <string>
 
 #include "exceptions.hpp"
 #include "logging.hpp"
 #include "logging_api.hpp"
-
-static std::mutex g_logging_lock;
 
 /// Initialize the logging system.
 /**
@@ -40,6 +37,7 @@ static std::mutex g_logging_lock;
 void
 rclpy_logging_initialize()
 {
+  rclpy::LoggingGuard scoped_logging_guard;
   rcutils_ret_t ret = rcutils_logging_initialize();
   if (ret != RCUTILS_RET_OK) {
     rcutils_reset_error();
@@ -54,6 +52,7 @@ rclpy_logging_initialize()
 void
 rclpy_logging_shutdown()
 {
+  rclpy::LoggingGuard scoped_logging_guard;
   // TODO(dhood): error checking
   rcutils_ret_t ret = rcutils_logging_shutdown();
   if (ret != RCUTILS_RET_OK) {
@@ -73,7 +72,7 @@ rclpy_logging_shutdown()
 void
 rclpy_logging_set_logger_level(const char * name, int level, bool detailed_error = false)
 {
-  std::lock_guard<std::mutex> lock(g_logging_lock);
+  rclpy::LoggingGuard scoped_logging_guard;
   rcutils_ret_t ret = rcutils_logging_set_logger_level(name, level);
   if (ret != RCUTILS_RET_OK) {
     if (detailed_error) {
@@ -97,7 +96,7 @@ rclpy_logging_set_logger_level(const char * name, int level, bool detailed_error
 int
 rclpy_logging_get_logger_effective_level(const char * name)
 {
-  std::lock_guard<std::mutex> lock(g_logging_lock);
+  rclpy::LoggingGuard scoped_logging_guard;
   int logger_level = rcutils_logging_get_logger_effective_level(name);
 
   if (logger_level < 0) {
@@ -117,7 +116,7 @@ rclpy_logging_get_logger_effective_level(const char * name)
 int
 rclpy_logging_get_logger_level(const char * name)
 {
-  std::lock_guard<std::mutex> lock(g_logging_lock);
+  rclpy::LoggingGuard scoped_logging_guard;
   int logger_level = rcutils_logging_get_logger_level(name);
 
   if (logger_level < 0) {
@@ -138,6 +137,7 @@ rclpy_logging_get_logger_level(const char * name)
 bool
 rclpy_logging_logger_is_enabled_for(const char * name, int severity)
 {
+  rclpy::LoggingGuard scoped_logging_guard;
   return rcutils_logging_logger_is_enabled_for(name, severity);
 }
 
@@ -161,6 +161,7 @@ rclpy_logging_rcutils_log(
   const char * file_name,
   uint64_t line_number)
 {
+  rclpy::LoggingGuard scoped_logging_guard;
   RCUTILS_LOGGING_AUTOINIT;
   rcutils_log_location_t logging_location = {function_name, file_name, line_number};
   rcutils_log(&logging_location, severity, name, "%s", message);

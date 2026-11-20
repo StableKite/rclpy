@@ -172,7 +172,7 @@ void EventsExecutor::spin(std::optional<double> timeout_sec, bool stop_after_use
     // Release the GIL while we block.  Any callbacks on the events queue that want to touch Python
     // will need to reacquire it though.
     py::gil_scoped_release gil_release;
-    if (timeout_sec) {
+    if (timeout_sec && *timeout_sec >= 0.0) {
       const auto timeout_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(*timeout_sec));
       const auto end = std::chrono::steady_clock::now() + timeout_ns;

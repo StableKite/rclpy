@@ -43,6 +43,8 @@ class FutureState(Enum):
 class Future(Generic[T]):
     """Represent the outcome of a task in the future."""
 
+    _accept_completion_after_cancel = True
+
     def __init__(self, *, executor: Optional['Executor'] = None) -> None:
         self._state = FutureState.PENDING
         # the final return value of the handler
@@ -82,8 +84,7 @@ class Future(Generic[T]):
         with self._lock:
             if not self._pending():
                 return
-
-        self._state = FutureState.CANCELLED
+            self._state = FutureState.CANCELLED
         self._schedule_or_invoke_done_callbacks()
 
     def cancelled(self) -> bool:
@@ -131,6 +132,8 @@ class Future(Generic[T]):
         :param result: The output of a long running task.
         """
         with self._lock:
+            if self.cancelled() and not self._accept_completion_after_cancel:
+                return
             self._result = result
             self._state = FutureState.FINISHED
 
@@ -143,6 +146,8 @@ class Future(Generic[T]):
         :param exception: The exception raised by the task.
         """
         with self._lock:
+            if self.cancelled() and not self._accept_completion_after_cancel:
+                return
             self._exception = exception
             self._exception_fetched = False
             self._state = FutureState.FINISHED
@@ -265,6 +270,8 @@ class Task(Future[T]):
     This class should only be instantiated by :class:`rclpy.executors.Executor`.
     """
 
+    _accept_completion_after_cancel = False
+
     @overload
     def __init__(self,
                  handler: Callable[..., Coroutine[Any, Any, T]],
@@ -340,10 +347,10 @@ class Task(Future[T]):
                 except Exception as e:
                     self.set_exception(e)
                 self._complete_task()
-
-            self._executing = False
         finally:
+            self._executing = False
             self._task_lock.release()
+            self._close_cancelled_handler()
 
     def _execute_coroutine_step(self, coro: Coroutine[Any, Any, T]) -> None:
         """Execute or resume a coroutine task."""
@@ -358,6 +365,8 @@ class Task(Future[T]):
             self.set_exception(e)
             self._complete_task()
         else:
+            if self.cancelled():
+                return
             # The coroutine yielded; suspend the task until it is resumed
             assert self._executor
             executor = self._executor()
@@ -393,6 +402,17 @@ class Task(Future[T]):
         self._args = None
         self._kwargs = None
 
+    def _close_cancelled_handler(self) -> None:
+        if not self.cancelled() or not self._task_lock.acquire(blocking=False):
+            return
+        try:
+            handler = self._handler
+            self._complete_task()
+        finally:
+            self._task_lock.release()
+        if inspect.iscoroutine(handler):
+            handler.close()
+
     def executing(self) -> bool:
         """
         Check if the task is currently being executed.
@@ -402,7 +422,6 @@ class Task(Future[T]):
         return self._executing
 
     def cancel(self) -> None:
-        if self._pending() and inspect.iscoroutine(self._handler):
-            self._handler.close()
-
         super().cancel()
+        # A running step closes its own coroutine once send() returns.
+        self._close_cancelled_handler()

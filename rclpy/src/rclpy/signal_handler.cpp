@@ -60,7 +60,9 @@ sem_t g_signal_handler_sem;
 
 std::thread g_deferred_signal_handling_thread;
 
-// relying on python GIL for safety
+// Serialize Python callers that start or stop the deferred handler. The
+// signal callback and its deferred worker use the atomic flag instead.
+std::mutex g_signal_handler_mutex;
 std::atomic<bool> g_signal_handler_installed = false;
 
 void
@@ -467,6 +469,7 @@ enum class SignalHandlerOptions : int
 void
 install_signal_handlers(SignalHandlerOptions options)
 {
+  std::lock_guard<std::mutex> lock(g_signal_handler_mutex);
   setup_deferred_signal_handler();
   switch (options) {
     case SignalHandlerOptions::No:
@@ -491,6 +494,7 @@ install_signal_handlers(SignalHandlerOptions options)
 SignalHandlerOptions
 get_current_signal_handlers_options()
 {
+  std::lock_guard<std::mutex> lock(g_signal_handler_mutex);
   // conversion to SignalHandlerOptions value
   return SignalHandlerOptions{g_sigterm_installed * 2 + g_sigint_installed};
 }
@@ -499,6 +503,7 @@ get_current_signal_handlers_options()
 void
 uninstall_signal_handlers()
 {
+  std::lock_guard<std::mutex> lock(g_signal_handler_mutex);
   unregister_sigint_signal_handler();
   unregister_sigterm_signal_handler();
   teardown_deferred_signal_handler();

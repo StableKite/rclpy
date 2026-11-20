@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from threading import Event
+from threading import Thread
 from typing import Any
 from typing import Callable
 from typing import List
@@ -99,6 +101,31 @@ class TestTask(unittest.TestCase):
         t = Task(lambda: None)
         t.cancel()
         self.assertTrue(t.cancelled())
+
+    def test_cancel_during_coroutine_execution(self) -> None:
+        entered = Event()
+        resume = Event()
+
+        async def handler() -> str:
+            entered.set()
+            if not resume.wait(timeout=5):
+                raise RuntimeError('coroutine was never released')
+            return 'late result'
+
+        task = Task(handler)
+        worker = Thread(target=task)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(timeout=5))
+            task.cancel()
+            self.assertTrue(task.cancelled())
+        finally:
+            resume.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(task.result())
 
     def test_done_task_cancelled(self) -> None:
         t = Task(lambda: None)
