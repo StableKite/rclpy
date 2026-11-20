@@ -305,7 +305,9 @@ def test_attach_clock_from_ros_time_activation_callback() -> None:
     second = Clock(clock_type=ClockType.ROS_TIME)
     source.attach_clock(first)
     threshold = JumpThreshold(min_forward=None, min_backward=None, on_clock_change=True)
-    with first.create_jump_callback(threshold, post_callback=lambda _: source.attach_clock(second)):
+    with first.create_jump_callback(
+        threshold, post_callback=lambda _: source.attach_clock(second)
+    ):
         source.ros_time_is_active = True
     assert first.ros_time_is_active
     assert second.ros_time_is_active

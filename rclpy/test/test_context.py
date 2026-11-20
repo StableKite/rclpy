@@ -139,7 +139,7 @@ def test_shutdown_destroys_all_tracked_nodes() -> None:
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='requires POSIX signal delivery')
 def test_signal_shutdown_after_context_destruction() -> None:
-    subprocess.run([sys.executable, '-c', '''
+    subprocess.run([sys.executable, '-c', """
 from importlib import import_module
 import os
 import signal
@@ -172,4 +172,4 @@ try:
     live.destroy()
 finally:
     uninstall_signal_handlers()
-''', rclpy_implementation.__name__], check=True, timeout=15)
+""", rclpy_implementation.__name__], check=True, timeout=15)
